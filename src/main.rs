@@ -7,10 +7,23 @@ mod windows;
 use anyhow::{Result, bail};
 use std::path::PathBuf;
 
+enum ReceiverMode {
+    Run(Option<PathBuf>),
+    PrintDirectory(Option<PathBuf>),
+    PrintCapabilities,
+}
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("receiver") => receiver::run(receiver_dir(args.collect())?),
+        Some("receiver") => match receiver_mode(args.collect())? {
+            ReceiverMode::Run(directory) => receiver::run(directory),
+            ReceiverMode::PrintDirectory(directory) => receiver::print_directory(directory),
+            ReceiverMode::PrintCapabilities => {
+                println!("{}", protocol::CAPABILITIES);
+                Ok(())
+            }
+        },
         Some("doctor") => run_doctor(args.next().map(PathBuf::from)),
         Some("--version" | "-V") => {
             println!("opencode-ssh-image-paste {}", env!("CARGO_PKG_VERSION"));
@@ -21,11 +34,18 @@ fn main() -> Result<()> {
     }
 }
 
-fn receiver_dir(args: Vec<String>) -> Result<Option<PathBuf>> {
+fn receiver_mode(args: Vec<String>) -> Result<ReceiverMode> {
     match args.as_slice() {
-        [] => Ok(None),
-        [flag, value] if flag == "--dir" => Ok(Some(PathBuf::from(value))),
-        _ => bail!("usage: opencode-ssh-image-paste receiver [--dir PATH]"),
+        [] => Ok(ReceiverMode::Run(None)),
+        [flag] if flag == "--print-directory" => Ok(ReceiverMode::PrintDirectory(None)),
+        [flag] if flag == "--capabilities" => Ok(ReceiverMode::PrintCapabilities),
+        [flag, value] if flag == "--dir" => Ok(ReceiverMode::Run(Some(PathBuf::from(value)))),
+        [print, flag, value] if print == "--print-directory" && flag == "--dir" => {
+            Ok(ReceiverMode::PrintDirectory(Some(PathBuf::from(value))))
+        }
+        _ => bail!(
+            "usage: opencode-ssh-image-paste receiver [--print-directory | --capabilities] [--dir PATH]"
+        ),
     }
 }
 
@@ -47,4 +67,24 @@ fn run_doctor(config: Option<PathBuf>) -> Result<()> {
 #[cfg(not(windows))]
 fn run_doctor(_config: Option<PathBuf>) -> Result<()> {
     bail!("doctor mode is only supported on Windows")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_receiver_capabilities_mode() {
+        assert!(matches!(
+            receiver_mode(vec!["--capabilities".into()]).unwrap(),
+            ReceiverMode::PrintCapabilities
+        ));
+    }
+
+    #[test]
+    fn rejects_capabilities_with_a_directory() {
+        assert!(
+            receiver_mode(vec!["--capabilities".into(), "--dir".into(), "/tmp".into()]).is_err()
+        );
+    }
 }

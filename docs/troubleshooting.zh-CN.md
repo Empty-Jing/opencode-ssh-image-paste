@@ -10,7 +10,7 @@
 & "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
 ```
 
-它会检查配置文件、OpenSSH、Windows Terminal、SSH 目标、远端 Receiver 版本和后台
+它会检查配置文件、OpenSSH、Windows Terminal、SSH 目标、远端 Receiver 协议兼容性和后台
 Client 进程。建议从第一个失败项开始处理。
 
 ## 安装停在 `Testing SSH connection`
@@ -74,12 +74,13 @@ Get-Process opencode-ssh-image-paste -ErrorAction SilentlyContinue | Stop-Proces
 
 纯文本剪贴板仍然由 Windows Terminal 自己处理，这是预期行为。
 
-## Receiver 版本检查失败
+## Receiver 兼容性检查失败
 
 直接检查远端二进制：
 
 ```powershell
 ssh.exe -n -T ubuntu-workbox "~/.local/bin/opencode-ssh-image-paste --version"
+ssh.exe -n -T ubuntu-workbox "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"
 ```
 
 如果文件不存在或架构错误，请重新运行 `bootstrap.ps1`。安装器会识别 `x86_64` 和
@@ -106,6 +107,37 @@ ssh.exe -n -T ubuntu-workbox "~/.local/bin/opencode-ssh-image-paste --version"
 ```
 
 如果远端主机不可达，本地卸载仍会完成，并提示远端 Receiver 仍有残留。
+
+## 测量图片粘贴延迟
+
+后台 Client 会为每一次被拦截的图片粘贴写入一条耗时记录：
+
+```text
+%APPDATA%\OpenCodeSSHImagePaste\timing.log
+```
+
+测试时可以在 PowerShell 中实时查看：
+
+```powershell
+Get-Content "$env:APPDATA\OpenCodeSSHImagePaste\timing.log" -Wait -Tail 20
+```
+
+每行会记录 `queue_ms`、`clipboard_read_ms`、`png_encode_ms`、
+`ssh_spawn_ms`、`upload_receiver_ms`、`modifier_wait_ms`、
+`input_guard_ms`、`terminal_paste_ms` 和 `bridge_total_ms`。`output=terminal_action` 表示
+远端路径通过对应的 Windows Terminal 槽位 Action 原子发送，没有替换系统剪贴板。同时还会记录图片尺寸、
+RGBA/PNG 字节数、尝试次数，以及 SSH 连接是 `cold`、`reused` 还是
+`reconnected`。
+
+`ssh_spawn_ms` 只表示本地 `ssh.exe` 进程的创建时间。对于 `cold` 或
+`reconnected` 请求，由于当前协议没有上传前的 ready 消息，SSH 握手和 Receiver
+启动耗时会包含在 `upload_receiver_ms` 中。`opencode_handoff_ms` 和
+`opencode_handoff_unix_ms` 表示模拟粘贴已经发送到 Windows Terminal 的时间点。
+OpenCode 没有提供处理完成回调，因此日志会明确记录
+`opencode_completion=unobservable`；需要把 handoff 时间与屏幕上附件出现的时间对照。
+
+成功和失败的请求都会写入日志。日志约 1 MiB 后轮转为 `timing.log.1`，且不会记录
+剪贴板图片内容、远端路径或 SSH 主机名。
 
 ## 提交问题
 

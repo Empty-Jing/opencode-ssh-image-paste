@@ -1,7 +1,8 @@
 [package]
 name = "opencode-ssh-image-paste"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
+rust-version = "1.89"
 description = "Paste Windows clipboard images into a remote OpenCode TUI over SSH"
 license = "MIT"
 readme = "README.md"
@@ -19,9 +20,10 @@ arboard = { version = "3.6", features = ["image-data"] }
 png = "0.18"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
   "Win32_System_Console",
   "Win32_System_DataExchange",
-  "Win32_System_Memory",
   "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",

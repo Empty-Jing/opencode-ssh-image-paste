@@ -7,37 +7,57 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: clippy,rustfmt
+      - name: Install cargo-audit 0.22.2
+        run: cargo install cargo-audit --version '=0.22.2' --locked --no-default-features
+      - name: Audit Rust dependencies
+        run: cargo audit --deny warnings
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo build --release --locked
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Validate PowerShell installer syntax
         shell: pwsh
         run: |
           $tokens = $null
           $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path ./bootstrap.ps1),
-            [ref]$tokens,
-            [ref]$errors
-          )
-          if ($errors.Count -gt 0) {
-            $errors | Format-List | Out-String | Write-Error
-            exit 1
+          foreach ($script in @("./bootstrap.ps1", "./install-windows.ps1")) {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              exit 1
+            }
           }
+      - name: Test bootstrap JSONC and migration fixtures
+        shell: pwsh
+        run: ./tests/bootstrap.Tests.ps1
       - name: Test bootstrap uninstall
         shell: pwsh
         run: |
@@ -46,15 +66,49 @@ jobs:
           $env:APPDATA = Join-Path $testRoot "AppData"
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\OpenCodeSSHImagePaste"
           $configDir = Join-Path $env:APPDATA "OpenCodeSSHImagePaste"
+          $terminalDir = Join-Path $env:LOCALAPPDATA "Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState"
+          $terminalSettings = Join-Path $terminalDir "settings.json"
 
           try {
-            New-Item -ItemType Directory -Force -Path $installDir, $configDir | Out-Null
+            New-Item -ItemType Directory -Force -Path $installDir, $configDir, $terminalDir | Out-Null
             Set-Content -Path (Join-Path $installDir "opencode-ssh-image-paste.exe") -Value "test"
             Set-Content -Path (Join-Path $configDir "config.toml") -Value "test = true"
+            @(
+              '{',
+              '  "actions": [',
+              '    {',
+              '      "command": {"action":"sendInput","input":"latest.png"},',
+              '      "id": "User.OpenCodeSSHImagePaste.AtomicPaste"',
+              '    },',
+              '    {"command":"copy","id":"User.KeepThisAction"}',
+              '  ],',
+              '  "keybindings": [',
+              '    {',
+              '      "keys": "ctrl+alt+shift+f24",',
+              '      "id": "User.OpenCodeSSHImagePaste.AtomicPaste"',
+              '    }',
+              '  ]',
+              '}'
+            ) | Set-Content -Path $terminalSettings
+            Set-Content -Path "$terminalSettings.opencode-ssh-image-paste.backup" -Value "backup"
 
             & ./bootstrap.ps1 -Uninstall
             if (Test-Path $installDir) { throw "Uninstall did not remove the install directory." }
             if (Test-Path $configDir) { throw "Uninstall did not remove the config directory." }
+            if ((Get-Content -Raw $terminalSettings) -match "OpenCodeSSHImagePaste") {
+              throw "Uninstall did not remove the Windows Terminal action."
+            }
+            if ((Get-Content -Raw $terminalSettings) -notmatch "User.KeepThisAction") {
+              throw "Uninstall removed an unrelated Windows Terminal action."
+            }
+            try {
+              Get-Content -Raw $terminalSettings | ConvertFrom-Json | Out-Null
+            } catch {
+              throw "Uninstall left invalid Windows Terminal JSON: $_"
+            }
+            if (Test-Path "$terminalSettings.opencode-ssh-image-paste.backup") {
+              throw "Uninstall did not remove the Windows Terminal settings backup."
+            }
 
             New-Item -ItemType Directory -Force -Path $installDir, $configDir | Out-Null
             Set-Content -Path (Join-Path $installDir "opencode-ssh-image-paste.exe") -Value "test"
@@ -68,9 +122,10 @@ jobs:
           } finally {
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $testRoot
           }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: clippy,rustfmt
       - run: cargo check --tests --locked
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
       - run: cargo build --release --locked

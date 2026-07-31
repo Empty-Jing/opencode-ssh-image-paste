@@ -1,8 +1,10 @@
 use std::io::{self, Read, Write};
 
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
-const REQUEST_MAGIC: &[u8; 4] = b"OCB1";
-const RESPONSE_MAGIC: &[u8; 4] = b"OCR1";
+pub const IMAGE_SLOT_COUNT: usize = 50;
+pub const CAPABILITIES: &str = "protocol=2;image_slots=50;response=slot-path-v1";
+const REQUEST_MAGIC: &[u8; 4] = b"OCB2";
+const RESPONSE_MAGIC: &[u8; 4] = b"OCR2";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
@@ -127,6 +129,40 @@ fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_slot_count_matches_protocol_constant() {
+        assert_eq!(
+            CAPABILITIES,
+            "protocol=2;image_slots=50;response=slot-path-v1"
+        );
+        assert!(CAPABILITIES.contains(&format!("image_slots={IMAGE_SLOT_COUNT}")));
+    }
+
+    #[test]
+    fn rejects_version_one_request_magic() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"OCB1");
+        bytes.extend_from_slice(&1_u64.to_be_bytes());
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            read_request(bytes.as_slice()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn rejects_version_one_response_magic() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"OCR1");
+        bytes.extend_from_slice(&1_u64.to_be_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        assert_eq!(
+            read_response(bytes.as_slice()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 
     #[test]
     fn request_round_trip() {

@@ -2,45 +2,62 @@ use crate::protocol::{self, Request};
 use anyhow::{Context, Result, bail};
 use arboard::{Clipboard, ImageData};
 use serde::Deserialize;
-use std::fs;
-use std::io::{BufReader, BufWriter};
+use std::borrow::Cow;
+use std::fs::{self, OpenOptions};
+use std::io::{BufReader, BufWriter, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{OnceLock, mpsc};
 use std::thread;
-use std::time::Duration;
-use windows_sys::Win32::Foundation::{CloseHandle, GlobalFree, LPARAM, LRESULT, WPARAM};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, LRESULT, SetLastError, WPARAM,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+    GetDIBits, GetObjectW,
+};
 use windows_sys::Win32::System::Console::FreeConsole;
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
-    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
-};
-use windows_sys::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+    CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+    OpenClipboard, RegisterClipboardFormatW,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+    CREATE_NO_WINDOW, CreateMutexW, OpenProcess, PROCESS_TERMINATE, TerminateProcess,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, KEYEVENTF_KEYUP, VK_CONTROL, VK_SHIFT, VK_V, keybd_event,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+    VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW,
-    KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
 };
 
-const CF_DIBV5: u32 = 17;
+const CF_BITMAP: u32 = 2;
+const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
+const CF_DIBV5: u32 = 17;
 const DEFAULT_WINDOW_CLASS: &str = "CASCADIA_HOSTING_WINDOW_CLASS";
+const TIMING_LOG_MAX_BYTES: u64 = 1024 * 1024;
+const TERMINAL_ACTION_ID: &str = "User.OpenCodeSSHImagePaste.AtomicPaste";
+const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\OpenCodeSSHImagePaste.Client";
+const INPUT_EVENT_MARKER: usize = 0x4f43_5349;
+const MAX_IMAGE_DIMENSION: usize = 16_384;
+const MAX_IMAGE_PIXELS: usize = 64 * 1024 * 1024;
+const MAX_RAW_IMAGE_BYTES: usize = MAX_IMAGE_PIXELS * 4;
+const COMMAND_WAIT_POLL: Duration = Duration::from_millis(25);
+const VK_F11_CODE: u16 = 0x7A;
+const VK_F12_CODE: u16 = 0x7B;
+const VK_F13_CODE: u16 = 0x7C;
 
 static REQUESTS: OnceLock<mpsc::SyncSender<PasteRequest>> = OnceLock::new();
 static WINDOW_CLASS: OnceLock<String> = OnceLock::new();
 static PNG_FORMAT: OnceLock<u32> = OnceLock::new();
-static MARKER_FORMAT: OnceLock<u32> = OnceLock::new();
 static SUPPRESS_V_UP: AtomicBool = AtomicBool::new(false);
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static USER_ACTIVITY: AtomicU64 = AtomicU64::new(0);
@@ -50,6 +67,57 @@ struct PasteRequest {
     window: isize,
     clipboard_sequence: u32,
     user_activity: u64,
+    queued_at: Instant,
+}
+
+struct PasteTiming {
+    request_id: u64,
+    started_at: Instant,
+    queue: Duration,
+    clipboard_read: Option<Duration>,
+    png_encode: Option<Duration>,
+    ssh_spawn: Option<Duration>,
+    retry_sleep: Option<Duration>,
+    upload_receiver: Option<Duration>,
+    modifier_wait: Option<Duration>,
+    input_guard: Option<Duration>,
+    terminal_paste: Option<Duration>,
+    opencode_handoff: Option<Duration>,
+    opencode_handoff_unix_ms: Option<u128>,
+    image_width: usize,
+    image_height: usize,
+    raw_bytes: usize,
+    png_bytes: usize,
+    connection: &'static str,
+    ssh_attempts: u32,
+    upload_attempts: u32,
+}
+
+impl PasteTiming {
+    fn new(request_id: u64, queued_at: Instant) -> Self {
+        Self {
+            request_id,
+            started_at: queued_at,
+            queue: queued_at.elapsed(),
+            clipboard_read: None,
+            png_encode: None,
+            ssh_spawn: None,
+            retry_sleep: None,
+            upload_receiver: None,
+            modifier_wait: None,
+            input_guard: None,
+            terminal_paste: None,
+            opencode_handoff: None,
+            opencode_handoff_unix_ms: None,
+            image_width: 0,
+            image_height: 0,
+            raw_bytes: 0,
+            png_bytes: 0,
+            connection: "not_started",
+            ssh_attempts: 0,
+            upload_attempts: 0,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,8 +128,8 @@ struct Config {
     ssh_arguments: Vec<String>,
     remote_command: String,
     remote_probe_command: String,
+    terminal_paste_directory: String,
     terminal_window_class: String,
-    restore_clipboard_delay_ms: u64,
     request_timeout_seconds: u64,
 }
 
@@ -72,28 +140,153 @@ impl Default for Config {
             ssh_program: "ssh.exe".into(),
             ssh_arguments: Vec::new(),
             remote_command: "~/.local/bin/opencode-ssh-image-paste receiver".into(),
-            remote_probe_command: "~/.local/bin/opencode-ssh-image-paste --version".into(),
+            remote_probe_command: "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"
+                .into(),
+            terminal_paste_directory: String::new(),
             terminal_window_class: DEFAULT_WINDOW_CLASS.into(),
-            restore_clipboard_delay_ms: 150,
             request_timeout_seconds: 15,
         }
     }
 }
 
+fn validate_ssh_target(target: &str) -> Result<()> {
+    anyhow::ensure!(!target.trim().is_empty(), "ssh_target must not be empty");
+    anyhow::ensure!(
+        !target.starts_with('-'),
+        "ssh_target must not start with '-'"
+    );
+    anyhow::ensure!(
+        !target.chars().any(char::is_control),
+        "ssh_target must not contain control characters"
+    );
+    Ok(())
+}
+
+fn configure_ssh_options(
+    command: &mut Command,
+    user_arguments: &[String],
+    connect_timeout_seconds: u64,
+    keepalive: bool,
+) {
+    command
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg(format!("ConnectTimeout={connect_timeout_seconds}"));
+    if keepalive {
+        command.args(["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]);
+    }
+    // OpenSSH keeps the first value obtained for most options. Append user
+    // arguments so -F/-J remain available without allowing later -o values to
+    // override the non-interactive and timeout guarantees above.
+    command.args(user_arguments);
+}
+
+enum TimedCommandOutput {
+    Completed(Output),
+    TimedOut,
+}
+
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<TimedCommandOutput> {
+    let mut child = command.spawn().context("start timed child process")?;
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .context("poll timed child process")?
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .map(TimedCommandOutput::Completed)
+                .context("collect timed child process output");
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            if let Err(kill_error) = child.kill()
+                && child
+                    .try_wait()
+                    .context("check timed child process after termination failure")?
+                    .is_none()
+            {
+                return Err(kill_error).context("terminate timed out child process");
+            }
+            child
+                .wait_with_output()
+                .context("reap timed out child process")?;
+            return Ok(TimedCommandOutput::TimedOut);
+        }
+        thread::sleep(COMMAND_WAIT_POLL.min(timeout - elapsed));
+    }
+}
+
+struct SingleInstanceGuard(HANDLE);
+
+fn single_instance_mutex_name() -> Vec<u16> {
+    SINGLE_INSTANCE_MUTEX_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn client_single_instance_lock_exists() -> Result<bool> {
+    let name = single_instance_mutex_name();
+    unsafe { SetLastError(0) };
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error())
+            .context("open the Windows client single-instance mutex");
+    }
+    let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    unsafe { CloseHandle(handle) };
+    Ok(exists)
+}
+
+impl SingleInstanceGuard {
+    fn acquire() -> Result<Self> {
+        let name = single_instance_mutex_name();
+        unsafe { SetLastError(0) };
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error())
+                .context("create the Windows client single-instance mutex");
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            bail!("another opencode SSH image paste client is already running")
+        }
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
 pub fn run(config_path: Option<PathBuf>) -> Result<()> {
+    let _single_instance = SingleInstanceGuard::acquire()?;
     // Client mode is a background process. The same executable remains a console
     // application so commands such as `doctor` can print useful diagnostics.
     unsafe { FreeConsole() };
     let config_path = config_path.unwrap_or_else(default_config_path);
     let config = load_config(&config_path)?;
-    anyhow::ensure!(
-        !config.ssh_target.trim().is_empty(),
-        "ssh_target is required in {}",
-        config_path.display()
-    );
+    validate_ssh_target(&config.ssh_target)
+        .with_context(|| format!("invalid ssh_target in {}", config_path.display()))?;
     anyhow::ensure!(
         config.request_timeout_seconds > 0,
         "request_timeout_seconds must be positive"
+    );
+    anyhow::ensure!(
+        is_safe_remote_directory(&config.terminal_paste_directory),
+        "terminal_paste_directory must be a safe absolute Linux path; rerun bootstrap.ps1 to install the Windows Terminal actions"
     );
     WINDOW_CLASS
         .set(config.terminal_window_class.clone())
@@ -107,23 +300,13 @@ pub fn run(config_path: Option<PathBuf>) -> Result<()> {
     PNG_FORMAT
         .set(png_format)
         .map_err(|_| anyhow::anyhow!("PNG clipboard format was already registered"))?;
-    let marker = "OpenCodeSSHImagePasteMarker\0"
-        .encode_utf16()
-        .collect::<Vec<_>>();
-    let marker_format = unsafe { RegisterClipboardFormatW(marker.as_ptr()) };
-    anyhow::ensure!(
-        marker_format != 0,
-        "could not register the clipboard marker format"
-    );
-    MARKER_FORMAT
-        .set(marker_format)
-        .map_err(|_| anyhow::anyhow!("clipboard marker format was already registered"))?;
 
     let (sender, receiver) = mpsc::sync_channel(3);
     REQUESTS
         .set(sender)
         .map_err(|_| anyhow::anyhow!("keyboard hook was already initialized"))?;
-    thread::spawn(move || worker(receiver, config));
+    let timing_log = timing_log_path(&config_path);
+    thread::spawn(move || worker(receiver, config, timing_log));
 
     eprintln!("opencode SSH image paste is running; Ctrl+V image interception is active");
     run_keyboard_hook()
@@ -154,13 +337,23 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
             anyhow::bail!("doctor found {failures} problem(s)");
         }
     };
+    let target_error = validate_ssh_target(&config.ssh_target)
+        .err()
+        .map(|error| format!("{error:#}"));
     check(
         "SSH target",
-        !config.ssh_target.trim().is_empty(),
-        if config.ssh_target.trim().is_empty() {
-            "ssh_target is empty"
+        target_error.is_none(),
+        target_error.as_deref().unwrap_or(&config.ssh_target),
+        &mut failures,
+    );
+    let timeout_valid = config.request_timeout_seconds > 0;
+    check(
+        "Request timeout",
+        timeout_valid,
+        if timeout_valid {
+            "positive"
         } else {
-            &config.ssh_target
+            "request_timeout_seconds must be positive"
         },
         &mut failures,
     );
@@ -213,29 +406,55 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
         &mut failures,
     );
 
-    if !config.ssh_target.trim().is_empty() {
+    match terminal_action_status(&config.terminal_paste_directory) {
+        Ok(detail) => check(
+            "Windows Terminal paste action",
+            true,
+            &detail,
+            &mut failures,
+        ),
+        Err(error) => check(
+            "Windows Terminal paste action",
+            false,
+            &format!("{error:#}"),
+            &mut failures,
+        ),
+    }
+
+    if target_error.is_none() && timeout_valid {
         let mut remote = Command::new(&config.ssh_program);
+        configure_ssh_options(
+            &mut remote,
+            &config.ssh_arguments,
+            config.request_timeout_seconds,
+            false,
+        );
         remote
-            .args(&config.ssh_arguments)
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg(format!("ConnectTimeout={}", config.request_timeout_seconds))
             .arg("-T")
             .arg(&config.ssh_target)
             .arg(&config.remote_probe_command)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW);
-        match remote.output() {
-            Ok(output) if output.status.success() => check(
-                "Remote receiver",
-                true,
-                "SSH connection and receiver version check succeeded",
-                &mut failures,
-            ),
-            Ok(output) => {
+        match command_output_with_timeout(
+            &mut remote,
+            Duration::from_secs(config.request_timeout_seconds),
+        ) {
+            Ok(TimedCommandOutput::Completed(output)) if output.status.success() => {
+                let compatible = receiver_capabilities_are_compatible(&output.stdout);
+                check(
+                    "Remote receiver",
+                    compatible,
+                    if compatible {
+                        "SSH connection and receiver capability check succeeded"
+                    } else {
+                        "receiver capabilities are incompatible; rerun bootstrap.ps1 to install matching binaries"
+                    },
+                    &mut failures,
+                );
+            }
+            Ok(TimedCommandOutput::Completed(output)) => {
                 let detail = String::from_utf8_lossy(&output.stderr);
                 check(
                     "Remote receiver",
@@ -248,10 +467,19 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
                     &mut failures,
                 );
             }
+            Ok(TimedCommandOutput::TimedOut) => check(
+                "Remote receiver",
+                false,
+                &format!(
+                    "SSH capability check timed out after {} second(s); the process was terminated",
+                    config.request_timeout_seconds
+                ),
+                &mut failures,
+            ),
             Err(error) => check(
                 "Remote receiver",
                 false,
-                &format!("could not start SSH: {error}"),
+                &format!("SSH capability check failed: {error:#}"),
                 &mut failures,
             ),
         }
@@ -278,15 +506,28 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
                 .count()
         })
         .unwrap_or_default();
+    let client_lock = client_single_instance_lock_exists();
+    let process_detail = match (process_count, &client_lock) {
+        (2, Ok(true)) => "client process and single-instance lock are present".to_owned(),
+        (0 | 1, _) => "client process was not found".to_owned(),
+        (count, _) if count > 2 => format!(
+            "found {count} same-name processes; expected this doctor process plus exactly one client"
+        ),
+        (_, Ok(false)) => {
+            "same-name process found, but the client single-instance lock is absent".to_owned()
+        }
+        (_, Err(error)) => format!("could not inspect the client single-instance lock: {error:#}"),
+        _ => "client process state is inconsistent".to_owned(),
+    };
     check(
         "Background client",
-        process_count >= 2,
-        if process_count >= 2 {
-            "client process is running"
-        } else {
-            "client process was not found"
-        },
+        process_count == 2 && matches!(client_lock, Ok(true)),
+        &process_detail,
         &mut failures,
+    );
+    println!(
+        "[INFO] Timing log: {}",
+        timing_log_path(&config_path).display()
     );
 
     if failures == 0 {
@@ -295,6 +536,10 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
     } else {
         anyhow::bail!("doctor found {failures} problem(s)")
     }
+}
+
+fn receiver_capabilities_are_compatible(output: &[u8]) -> bool {
+    String::from_utf8_lossy(output).trim() == protocol::CAPABILITIES
 }
 
 fn check(name: &str, passed: bool, detail: &str, failures: &mut u32) {
@@ -306,11 +551,91 @@ fn check(name: &str, passed: bool, detail: &str, failures: &mut u32) {
     }
 }
 
+fn terminal_action_status(remote_directory: &str) -> Result<String> {
+    anyhow::ensure!(
+        is_safe_remote_directory(remote_directory),
+        "terminal_paste_directory is not a safe absolute Linux path; rerun bootstrap.ps1"
+    );
+    let settings = windows_terminal_settings_paths();
+    anyhow::ensure!(
+        !settings.is_empty(),
+        "Windows Terminal settings.json was not found; open Windows Terminal once, then rerun bootstrap.ps1"
+    );
+
+    let mut configured = Vec::new();
+    for path in &settings {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        let complete = (0..protocol::IMAGE_SLOT_COUNT).all(|slot| {
+            content.contains(&terminal_action_id(slot))
+                && content.contains(&remote_slot_path(remote_directory, slot))
+        });
+        if complete {
+            configured.push(path.display().to_string());
+        }
+    }
+    anyhow::ensure!(
+        !configured.is_empty(),
+        "one or more {TERMINAL_ACTION_ID} slot actions for {remote_directory:?} are missing; rerun bootstrap.ps1"
+    );
+    Ok(format!("configured in {}", configured.join(", ")))
+}
+
+fn is_safe_remote_directory(path: &str) -> bool {
+    path.starts_with('/') && !path.ends_with('/') && !path.chars().any(char::is_control)
+}
+
+fn remote_slot_path(directory: &str, slot: usize) -> String {
+    format!("{directory}/image-{slot:02}.png")
+}
+
+fn terminal_action_id(slot: usize) -> String {
+    format!("{TERMINAL_ACTION_ID}.Slot{slot:02}")
+}
+
+fn windows_terminal_settings_paths() -> Vec<PathBuf> {
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    let packages = local_app_data.join("Packages");
+    if let Ok(entries) = fs::read_dir(packages) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !name
+                .to_string_lossy()
+                .starts_with("Microsoft.WindowsTerminal")
+            {
+                continue;
+            }
+            let path = entry.path().join("LocalState/settings.json");
+            if path.is_file() {
+                paths.push(path);
+            }
+        }
+    }
+    let unpackaged = local_app_data.join("Microsoft/Windows Terminal/settings.json");
+    if unpackaged.is_file() {
+        paths.push(unpackaged);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 fn default_config_path() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("OpenCodeSSHImagePaste/config.toml")
+}
+
+fn timing_log_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("timing.log")
 }
 
 fn load_config(path: &Path) -> Result<Config> {
@@ -331,21 +656,24 @@ fn run_keyboard_hook() -> Result<()> {
         bail!("could not install the Windows low-level mouse hook")
     }
     let mut message: MSG = unsafe { std::mem::zeroed() };
-    loop {
+    let message_result = loop {
         let result = unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) };
-        if result <= 0 {
-            break;
+        if result == -1 {
+            break Err(std::io::Error::last_os_error()).context("read the Windows message queue");
+        }
+        if result == 0 {
+            break Ok(());
         }
         unsafe {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-    }
+    };
     unsafe {
         UnhookWindowsHookEx(mouse_hook);
         UnhookWindowsHookEx(keyboard_hook);
     }
-    Ok(())
+    message_result
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -353,6 +681,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
     }
     let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+    if event.flags & LLKHF_INJECTED != 0 && event.dwExtraInfo == INPUT_EVENT_MARKER {
+        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+    }
     let key_down = wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN;
     if event.vkCode != u32::from(VK_V) {
         if key_down {
@@ -365,7 +696,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     if key_up && SUPPRESS_V_UP.swap(false, Ordering::SeqCst) {
         return 1;
     }
-    if !key_down || !control_is_down() || !clipboard_has_image_without_text() {
+    if !key_down || !paste_chord_is_exact() || !clipboard_has_image_without_text() {
         if key_down {
             USER_ACTIVITY.fetch_add(1, Ordering::SeqCst);
         }
@@ -383,6 +714,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         window: window as isize,
         clipboard_sequence: unsafe { GetClipboardSequenceNumber() },
         user_activity: USER_ACTIVITY.load(Ordering::SeqCst),
+        queued_at: Instant::now(),
     };
     if REQUESTS
         .get()
@@ -406,8 +738,15 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
-fn control_is_down() -> bool {
-    (unsafe { GetAsyncKeyState(i32::from(VK_CONTROL)) }) < 0
+fn key_is_down(key: u16) -> bool {
+    (unsafe { GetAsyncKeyState(i32::from(key)) }) < 0
+}
+
+fn paste_chord_is_exact() -> bool {
+    key_is_down(VK_CONTROL)
+        && ![VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
+            .into_iter()
+            .any(key_is_down)
 }
 
 fn clipboard_has_image_without_text() -> bool {
@@ -416,7 +755,9 @@ fn clipboard_has_image_without_text() -> bool {
     }
     let png = PNG_FORMAT.get().copied().unwrap_or_default();
     unsafe {
-        IsClipboardFormatAvailable(CF_DIBV5) != 0
+        IsClipboardFormatAvailable(CF_BITMAP) != 0
+            || IsClipboardFormatAvailable(CF_DIB) != 0
+            || IsClipboardFormatAvailable(CF_DIBV5) != 0
             || (png != 0 && IsClipboardFormatAvailable(png) != 0)
     }
 }
@@ -430,55 +771,291 @@ fn is_target_window(window: *mut core::ffi::c_void) -> bool {
         })
 }
 
-fn worker(receiver: mpsc::Receiver<PasteRequest>, config: Config) {
+fn worker(receiver: mpsc::Receiver<PasteRequest>, config: Config, timing_log: PathBuf) {
     let mut transport = Transport::new(&config);
     for request in receiver {
-        if let Err(error) = handle_paste(request, &config, &mut transport) {
-            eprintln!("image paste failed: {error:#}");
+        let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let mut timing = PasteTiming::new(request_id, request.queued_at);
+        match handle_paste(request, request_id, &config, &mut transport, &mut timing) {
+            Ok(()) => write_timing_log(&timing_log, &timing, "ok", None),
+            Err(error) => {
+                write_timing_log(&timing_log, &timing, "error", Some(&error));
+                eprintln!("image paste failed: {error:#}");
+            }
         }
     }
 }
 
-fn handle_paste(request: PasteRequest, config: &Config, transport: &mut Transport) -> Result<()> {
+fn handle_paste(
+    request: PasteRequest,
+    request_id: u64,
+    config: &Config,
+    transport: &mut Transport,
+    timing: &mut PasteTiming,
+) -> Result<()> {
     if request_changed(request) {
         bail!("focus or clipboard changed before the image could be read")
     }
 
-    let mut clipboard = Clipboard::new().context("open Windows clipboard")?;
-    let image = clipboard
-        .get_image()
-        .context("read clipboard image")?
-        .to_owned_img();
-    let png = encode_png(&image)?;
+    let stage = Instant::now();
+    let image = read_clipboard_image();
+    timing.clipboard_read = Some(stage.elapsed());
+    let image = image?;
+    timing.image_width = image.width;
+    timing.image_height = image.height;
+    timing.raw_bytes = image.bytes.len();
+
+    let stage = Instant::now();
+    let png = encode_png(&image);
+    timing.png_encode = Some(stage.elapsed());
+    let png = png?;
+    timing.png_bytes = png.len();
     anyhow::ensure!(
         png.len() <= protocol::MAX_IMAGE_BYTES,
         "encoded image exceeds 16 MiB"
     );
     let path = transport.upload(
-        NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
-        png.clone(),
+        request_id,
+        png,
         Duration::from_secs(config.request_timeout_seconds),
+        timing,
     )?;
+    let slot = (0..protocol::IMAGE_SLOT_COUNT)
+        .find(|slot| path == remote_slot_path(&config.terminal_paste_directory, *slot))
+        .with_context(|| {
+            format!(
+                "receiver returned {path:?}, which is not one of the configured image slots in {:?}; rerun bootstrap.ps1",
+                config.terminal_paste_directory
+            )
+        })?;
 
     if request_changed(request) {
         bail!("focus or clipboard changed while the image was uploading")
     }
-    if !wait_for_modifier_release() || request_changed(request) {
-        bail!("input changed before the remote path could be pasted")
+    let stage = Instant::now();
+    let modifier_released = wait_for_paste_keys_release();
+    timing.modifier_wait = Some(stage.elapsed());
+    if !modifier_released {
+        bail!("paste key or modifier was not released before the remote path could be pasted")
     }
 
-    let marker = marker_value();
-    set_clipboard_text_if_sequence(&path, &marker, request.clipboard_sequence, request.window)?;
-    if current_window() != request.window
-        || USER_ACTIVITY.load(Ordering::SeqCst) != request.user_activity
-        || !clipboard_marker_matches(&marker, request.window)?
-    {
-        restore_png_if_marker(&png, &marker, request.window)?;
+    let guard_stage = Instant::now();
+    let terminal_input_unchanged = !request_changed(request);
+    timing.input_guard = Some(guard_stage.elapsed());
+    if !terminal_input_unchanged {
         bail!("terminal input changed before the remote path could be pasted")
     }
-    send_terminal_paste();
-    thread::sleep(Duration::from_millis(config.restore_clipboard_delay_ms));
-    restore_png_if_marker(&png, &marker, request.window)
+
+    let stage = Instant::now();
+    trigger_terminal_paste_action(slot)?;
+    timing.terminal_paste = Some(stage.elapsed());
+    timing.opencode_handoff = Some(timing.started_at.elapsed());
+    timing.opencode_handoff_unix_ms = Some(unix_time_ms());
+    Ok(())
+}
+
+fn read_clipboard_image() -> Result<ImageData<'static>> {
+    let arboard_error =
+        match Clipboard::new()
+            .context("open Windows clipboard")
+            .and_then(|mut clipboard| {
+                clipboard
+                    .get_image()
+                    .context("decode clipboard image")
+                    .and_then(|image| {
+                        validate_image_layout(image.width, image.height, Some(image.bytes.len()))?;
+                        Ok(image)
+                    })
+            }) {
+            Ok(image) => return Ok(image),
+            Err(error) => error,
+        };
+
+    read_clipboard_bitmap().with_context(|| {
+        format!(
+            "decode clipboard image through Windows GDI after arboard failed: {arboard_error:#}"
+        )
+    })
+}
+
+fn read_clipboard_bitmap() -> Result<ImageData<'static>> {
+    anyhow::ensure!(
+        unsafe { OpenClipboard(std::ptr::null_mut()) } != 0,
+        "open clipboard for Windows bitmap conversion"
+    );
+    let _clipboard = ClipboardCloseGuard;
+
+    // Windows synthesizes CF_BITMAP when the clipboard owner provides CF_DIB or
+    // CF_DIBV5. Asking GDI for a top-down 32-bit DIB avoids depending on an
+    // application's private clipboard format (for example PixPinData).
+    let bitmap_handle = unsafe { GetClipboardData(CF_BITMAP) };
+    anyhow::ensure!(
+        !bitmap_handle.is_null(),
+        "clipboard does not expose or synthesize CF_BITMAP"
+    );
+
+    let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
+    let object_bytes = i32::try_from(std::mem::size_of::<BITMAP>())
+        .context("BITMAP structure is unexpectedly large")?;
+    anyhow::ensure!(
+        unsafe {
+            GetObjectW(
+                bitmap_handle,
+                object_bytes,
+                std::ptr::addr_of_mut!(bitmap).cast(),
+            )
+        } == object_bytes,
+        "read synthesized CF_BITMAP metadata"
+    );
+
+    let width = usize::try_from(bitmap.bmWidth).context("clipboard bitmap width is invalid")?;
+    let height_i32 = bitmap
+        .bmHeight
+        .checked_abs()
+        .context("clipboard bitmap height is invalid")?;
+    let height = usize::try_from(height_i32).context("clipboard bitmap height is invalid")?;
+    anyhow::ensure!(width > 0 && height > 0, "clipboard bitmap is empty");
+    let byte_len = validate_image_layout(width, height, None)?;
+    let mut bytes = vec![0_u8; byte_len];
+
+    let width_i32 = i32::try_from(width).context("clipboard bitmap width is too large")?;
+    let top_down_height = i32::try_from(height)
+        .context("clipboard bitmap height is too large")?
+        .checked_neg()
+        .context("clipboard bitmap height is too large")?;
+    let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
+    info.bmiHeader = BITMAPINFOHEADER {
+        biSize: u32::try_from(std::mem::size_of::<BITMAPINFOHEADER>())
+            .context("BITMAPINFOHEADER structure is unexpectedly large")?,
+        biWidth: width_i32,
+        biHeight: top_down_height,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        biSizeImage: u32::try_from(byte_len).context("clipboard bitmap is too large")?,
+        ..unsafe { std::mem::zeroed() }
+    };
+
+    let device_context = unsafe { CreateCompatibleDC(std::ptr::null_mut()) };
+    anyhow::ensure!(
+        !device_context.is_null(),
+        "create device context for clipboard bitmap conversion"
+    );
+    let _device_context = DeviceContextGuard(device_context);
+    let copied_lines = unsafe {
+        GetDIBits(
+            device_context,
+            bitmap_handle,
+            0,
+            u32::try_from(height).context("clipboard bitmap height is too large")?,
+            bytes.as_mut_ptr().cast(),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    anyhow::ensure!(
+        copied_lines == height_i32,
+        "convert clipboard bitmap to 32-bit pixels"
+    );
+
+    for pixel in bytes.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+        pixel[3] = 255;
+    }
+    Ok(ImageData {
+        width,
+        height,
+        bytes: Cow::Owned(bytes),
+    })
+}
+
+struct ClipboardCloseGuard;
+
+impl Drop for ClipboardCloseGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseClipboard();
+        }
+    }
+}
+
+struct DeviceContextGuard(*mut core::ffi::c_void);
+
+impl Drop for DeviceContextGuard {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteDC(self.0);
+        }
+    }
+}
+
+fn write_timing_log(
+    path: &Path,
+    timing: &PasteTiming,
+    outcome: &str,
+    error: Option<&anyhow::Error>,
+) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    if fs::metadata(path).is_ok_and(|metadata| metadata.len() >= TIMING_LOG_MAX_BYTES) {
+        let previous = path.with_extension("log.1");
+        let _ = fs::remove_file(&previous);
+        let _ = fs::rename(path, previous);
+    }
+    let Ok(mut log) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let error = error
+        .map(|error| format!("{error:#}"))
+        .unwrap_or_else(|| "-".into())
+        .replace(['\r', '\n', '\t'], " ");
+    let _ = writeln!(
+        log,
+        "unix_ms={} event=paste request={} outcome={} connection={} output=terminal_action queue_ms={} clipboard_read_ms={} png_encode_ms={} ssh_spawn_ms={} retry_sleep_ms={} upload_receiver_ms={} modifier_wait_ms={} input_guard_ms={} terminal_paste_ms={} bridge_total_ms={} opencode_handoff_ms={} opencode_handoff_unix_ms={} opencode_completion=unobservable image={}x{} raw_bytes={} png_bytes={} ssh_attempts={} upload_attempts={} error={:?}",
+        unix_time_ms(),
+        timing.request_id,
+        outcome,
+        timing.connection,
+        duration_ms(Some(timing.queue)),
+        duration_ms(timing.clipboard_read),
+        duration_ms(timing.png_encode),
+        duration_ms(timing.ssh_spawn),
+        duration_ms(timing.retry_sleep),
+        duration_ms(timing.upload_receiver),
+        duration_ms(timing.modifier_wait),
+        duration_ms(timing.input_guard),
+        duration_ms(timing.terminal_paste),
+        duration_ms(Some(timing.started_at.elapsed())),
+        duration_ms(timing.opencode_handoff),
+        timing
+            .opencode_handoff_unix_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into()),
+        timing.image_width,
+        timing.image_height,
+        timing.raw_bytes,
+        timing.png_bytes,
+        timing.ssh_attempts,
+        timing.upload_attempts,
+        error,
+    );
+}
+
+fn duration_ms(value: Option<Duration>) -> String {
+    value
+        .map(|duration| format!("{:.3}", duration.as_secs_f64() * 1000.0))
+        .unwrap_or_else(|| "-".into())
+}
+
+fn unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn request_changed(request: PasteRequest) -> bool {
@@ -488,139 +1065,90 @@ fn request_changed(request: PasteRequest) -> bool {
 }
 
 fn encode_png(image: &ImageData<'_>) -> Result<Vec<u8>> {
+    validate_image_layout(image.width, image.height, Some(image.bytes.len()))?;
     let width = u32::try_from(image.width).context("image width is too large")?;
     let height = u32::try_from(image.height).context("image height is too large")?;
-    anyhow::ensure!(
-        image.bytes.len() == image.width.saturating_mul(image.height).saturating_mul(4),
-        "clipboard image is not RGBA"
-    );
-    let mut bytes = Vec::new();
+    let mut bytes = BoundedBytes::new(protocol::MAX_IMAGE_BYTES);
     {
         let mut encoder = png::Encoder::new(&mut bytes, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header()?.write_image_data(&image.bytes)?;
+        encoder
+            .write_header()?
+            .write_image_data(&image.bytes)
+            .context("encode clipboard image as bounded PNG")?;
     }
-    Ok(bytes)
+    Ok(bytes.into_inner())
 }
 
-fn marker_value() -> [u8; 12] {
-    let mut marker = [0; 12];
-    marker[..4].copy_from_slice(&std::process::id().to_be_bytes());
-    marker[4..].copy_from_slice(
-        &NEXT_REQUEST_ID
-            .fetch_add(1, Ordering::Relaxed)
-            .to_be_bytes(),
-    );
-    marker
-}
-
-fn set_clipboard_text_if_sequence(
-    text: &str,
-    marker: &[u8],
-    sequence: u32,
-    owner: isize,
-) -> Result<()> {
-    let bytes = text
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    let clipboard = ClipboardLock::open(owner)?;
+fn validate_image_layout(
+    width: usize,
+    height: usize,
+    actual_bytes: Option<usize>,
+) -> Result<usize> {
+    anyhow::ensure!(width > 0 && height > 0, "clipboard image is empty");
     anyhow::ensure!(
-        clipboard_sequence() == sequence,
-        "clipboard changed before replacement"
+        width <= MAX_IMAGE_DIMENSION && height <= MAX_IMAGE_DIMENSION,
+        "clipboard image dimensions {width}x{height} exceed the {MAX_IMAGE_DIMENSION}-pixel edge limit"
     );
+    let pixels = width
+        .checked_mul(height)
+        .context("clipboard image dimensions are too large")?;
     anyhow::ensure!(
-        unsafe { EmptyClipboard() } != 0,
-        "could not clear the Windows clipboard"
+        pixels <= MAX_IMAGE_PIXELS,
+        "clipboard image contains {pixels} pixels, exceeding the {MAX_IMAGE_PIXELS}-pixel limit"
     );
-    set_clipboard_bytes(CF_UNICODETEXT, &bytes)?;
-    set_clipboard_bytes(
-        *MARKER_FORMAT
-            .get()
-            .context("clipboard marker is unavailable")?,
-        marker,
-    )?;
-    drop(clipboard);
-    Ok(())
-}
-
-fn restore_png_if_marker(png: &[u8], marker: &[u8], owner: isize) -> Result<()> {
-    let Some(format) = PNG_FORMAT.get().copied() else {
-        return Ok(());
-    };
-    let clipboard = ClipboardLock::open(owner)?;
-    if !clipboard_marker_matches_locked(marker) {
-        return Ok(());
-    }
+    let raw_bytes = pixels
+        .checked_mul(4)
+        .context("clipboard image byte length is too large")?;
     anyhow::ensure!(
-        unsafe { EmptyClipboard() } != 0,
-        "could not clear the Windows clipboard"
+        raw_bytes <= MAX_RAW_IMAGE_BYTES,
+        "clipboard image requires {raw_bytes} raw bytes, exceeding the {MAX_RAW_IMAGE_BYTES}-byte limit"
     );
-    set_clipboard_bytes(format, png)?;
-    drop(clipboard);
-    Ok(())
-}
-
-fn clipboard_marker_matches(marker: &[u8], owner: isize) -> Result<bool> {
-    let clipboard = ClipboardLock::open(owner)?;
-    let matches = clipboard_marker_matches_locked(marker);
-    drop(clipboard);
-    Ok(matches)
-}
-
-fn clipboard_marker_matches_locked(marker: &[u8]) -> bool {
-    let Some(format) = MARKER_FORMAT.get().copied() else {
-        return false;
-    };
-    let memory = unsafe { GetClipboardData(format) };
-    if memory.is_null() || unsafe { GlobalSize(memory) } < marker.len() {
-        return false;
-    }
-    let data = unsafe { GlobalLock(memory) } as *const u8;
-    if data.is_null() {
-        return false;
-    }
-    let matches = unsafe { std::slice::from_raw_parts(data, marker.len()) } == marker;
-    unsafe { GlobalUnlock(memory) };
-    matches
-}
-
-fn set_clipboard_bytes(format: u32, bytes: &[u8]) -> Result<()> {
-    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
-    anyhow::ensure!(!memory.is_null(), "could not allocate clipboard memory");
-    let target = unsafe { GlobalLock(memory) } as *mut u8;
-    if target.is_null() {
-        unsafe { GlobalFree(memory) };
-        bail!("could not lock clipboard memory")
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len());
-        GlobalUnlock(memory);
-    }
-    if unsafe { SetClipboardData(format, memory) }.is_null() {
-        unsafe { GlobalFree(memory) };
-        bail!("could not set Windows clipboard data")
-    }
-    Ok(())
-}
-
-struct ClipboardLock;
-
-impl ClipboardLock {
-    fn open(owner: isize) -> Result<Self> {
+    if let Some(actual_bytes) = actual_bytes {
         anyhow::ensure!(
-            unsafe { OpenClipboard(owner as *mut core::ffi::c_void) } != 0,
-            "could not open Windows clipboard"
+            actual_bytes == raw_bytes,
+            "clipboard image is not tightly packed RGBA: expected {raw_bytes} bytes, got {actual_bytes}"
         );
-        Ok(Self)
+    }
+    Ok(raw_bytes)
+}
+
+struct BoundedBytes {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedBytes {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
     }
 }
 
-impl Drop for ClipboardLock {
-    fn drop(&mut self) {
-        unsafe { CloseClipboard() };
+impl Write for BoundedBytes {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let Some(new_len) = self.bytes.len().checked_add(buffer.len()) else {
+            return Err(std::io::Error::other("encoded PNG length overflowed"));
+        };
+        if new_len > self.limit {
+            return Err(std::io::Error::other(format!(
+                "encoded PNG exceeds the {}-byte limit",
+                self.limit
+            )));
+        }
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -632,11 +1160,12 @@ fn current_window() -> isize {
     unsafe { GetForegroundWindow() as isize }
 }
 
-fn wait_for_modifier_release() -> bool {
+fn wait_for_paste_keys_release() -> bool {
     for _ in 0..100 {
-        let pressed = unsafe {
-            GetAsyncKeyState(i32::from(VK_CONTROL)) < 0 || GetAsyncKeyState(i32::from(VK_SHIFT)) < 0
-        };
+        let pressed = SUPPRESS_V_UP.load(Ordering::SeqCst)
+            || [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
+                .into_iter()
+                .any(key_is_down);
         if !pressed {
             return true;
         }
@@ -645,12 +1174,84 @@ fn wait_for_modifier_release() -> bool {
     false
 }
 
-fn send_terminal_paste() {
-    unsafe {
-        keybd_event(VK_CONTROL as u8, 0, 0, 0);
-        keybd_event(VK_V as u8, 0, 0, 0);
-        keybd_event(VK_V as u8, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_CONTROL as u8, 0, KEYEVENTF_KEYUP, 0);
+fn trigger_terminal_paste_action(slot: usize) -> Result<()> {
+    let (modifiers, key) = terminal_action_shortcut(slot)?;
+    let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
+    for modifier in &modifiers {
+        inputs.push(virtual_key_input(*modifier, 0));
+    }
+    inputs.push(virtual_key_input(key, 0));
+    inputs.push(virtual_key_input(key, KEYEVENTF_KEYUP));
+    for modifier in modifiers.iter().rev() {
+        inputs.push(virtual_key_input(*modifier, KEYEVENTF_KEYUP));
+    }
+
+    let count = u32::try_from(inputs.len()).context("terminal input is too large")?;
+    let size = i32::try_from(std::mem::size_of::<INPUT>()).expect("INPUT size fits in i32");
+    let sent = unsafe { SendInput(count, inputs.as_ptr(), size) };
+    if sent != count {
+        let injection_error = std::io::Error::last_os_error();
+        let cleanup = emergency_key_releases(&modifiers, key, sent as usize);
+        let released = if cleanup.is_empty() {
+            0
+        } else {
+            unsafe { SendInput(cleanup.len() as u32, cleanup.as_ptr(), size) }
+        };
+        bail!(
+            "could only inject {sent} of {count} terminal input events: {injection_error}; emergency key release inserted {released} of {} events",
+            cleanup.len()
+        )
+    }
+    Ok(())
+}
+
+fn emergency_key_releases(modifiers: &[u16], key: u16, sent: usize) -> Vec<INPUT> {
+    let pressed_modifiers = sent.min(modifiers.len());
+    let key_was_pressed = sent > modifiers.len();
+    let mut releases = Vec::with_capacity(pressed_modifiers + if key_was_pressed { 1 } else { 0 });
+    if key_was_pressed {
+        releases.push(virtual_key_input(key, KEYEVENTF_KEYUP));
+    }
+    for modifier in modifiers[..pressed_modifiers].iter().rev() {
+        releases.push(virtual_key_input(*modifier, KEYEVENTF_KEYUP));
+    }
+    releases
+}
+
+fn terminal_action_shortcut(slot: usize) -> Result<(Vec<u16>, u16)> {
+    anyhow::ensure!(
+        slot < protocol::IMAGE_SLOT_COUNT,
+        "image slot {slot} is out of range"
+    );
+    if slot >= 48 {
+        let key = if slot == 48 { VK_F11_CODE } else { VK_F12_CODE };
+        return Ok((vec![VK_CONTROL, VK_MENU, VK_SHIFT], key));
+    }
+
+    let group = slot / 12;
+    let key = VK_F13_CODE + u16::try_from(slot % 12).expect("slot key fits in u16");
+    let modifiers = match group {
+        0 => vec![VK_CONTROL, VK_MENU, VK_SHIFT],
+        1 => vec![VK_CONTROL, VK_MENU],
+        2 => vec![VK_CONTROL, VK_SHIFT],
+        3 => vec![VK_MENU, VK_SHIFT],
+        _ => unreachable!("slot group is bounded"),
+    };
+    Ok((modifiers, key))
+}
+
+fn virtual_key_input(virtual_key: u16, flags: u32) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: virtual_key,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: INPUT_EVENT_MARKER,
+            },
+        },
     }
 }
 
@@ -673,24 +1274,46 @@ impl Transport {
         }
     }
 
-    fn upload(&mut self, id: u64, png: Vec<u8>, timeout: Duration) -> Result<String> {
+    fn upload(
+        &mut self,
+        id: u64,
+        png: Vec<u8>,
+        timeout: Duration,
+        timing: &mut PasteTiming,
+    ) -> Result<String> {
         let request = Request { id, png };
+        timing.connection = if self.connection.is_some() {
+            "reused"
+        } else {
+            "cold"
+        };
         for attempt in 0..2 {
             if self.connection.is_none() {
-                match self.connect() {
+                timing.ssh_attempts += 1;
+                let stage = Instant::now();
+                let connection = self.connect();
+                add_duration(&mut timing.ssh_spawn, stage.elapsed());
+                match connection {
                     Ok(connection) => self.connection = Some(connection),
                     Err(error) if attempt == 0 => {
                         eprintln!("SSH clipboard connection failed, retrying: {error:#}");
+                        let stage = Instant::now();
                         thread::sleep(Duration::from_millis(250));
+                        add_duration(&mut timing.retry_sleep, stage.elapsed());
                         continue;
                     }
                     Err(error) => return Err(error),
                 }
             }
-            match self.connection.as_mut().unwrap().upload(&request, timeout) {
+            timing.upload_attempts += 1;
+            let stage = Instant::now();
+            let upload = self.connection.as_mut().unwrap().upload(&request, timeout);
+            add_duration(&mut timing.upload_receiver, stage.elapsed());
+            match upload {
                 Ok(path) => return Ok(path),
                 Err(error) if attempt == 0 => {
                     eprintln!("SSH clipboard connection was lost, reconnecting: {error:#}");
+                    timing.connection = "reconnected";
                     self.connection = None;
                 }
                 Err(error) => return Err(error),
@@ -700,24 +1323,17 @@ impl Transport {
     }
 
     fn connect(&self) -> Result<Connection> {
-        let mut child = Command::new(&self.ssh_program)
-            .args(&self.ssh_arguments)
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=5",
-                "-o",
-                "ServerAliveInterval=5",
-                "-o",
-                "ServerAliveCountMax=2",
-            ])
+        let mut command = Command::new(&self.ssh_program);
+        configure_ssh_options(&mut command, &self.ssh_arguments, 5, true);
+        let mut child = command
             .arg("-T")
             .arg(&self.ssh_target)
             .arg(&self.remote_command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Client mode detaches from the console with FreeConsole. Inheriting
+            // stderr after that can pass an invalid Windows handle to ssh.exe.
+            .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .with_context(|| format!("start {}", self.ssh_program))?;
@@ -729,6 +1345,10 @@ impl Transport {
             output,
         })
     }
+}
+
+fn add_duration(total: &mut Option<Duration>, value: Duration) {
+    *total = Some(total.unwrap_or_default() + value);
 }
 
 struct Connection {
@@ -775,5 +1395,190 @@ impl Drop for Connection {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    const COMMAND_TIMEOUT_HELPER_ENV: &str = "OPENCODE_SSH_IMAGE_PASTE_COMMAND_TIMEOUT_TEST_HELPER";
+
+    #[test]
+    fn ssh_target_rejects_options_and_control_characters() {
+        for target in ["workbox", "developer@workbox", "workbox.example"] {
+            validate_ssh_target(target).unwrap();
+        }
+        for target in ["", "   ", "-oProxyCommand=bad", "workbox\nother"] {
+            assert!(
+                validate_ssh_target(target).is_err(),
+                "unexpected valid target: {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forced_ssh_options_precede_user_arguments() {
+        let user_arguments = [
+            "-F",
+            "custom.conf",
+            "-J",
+            "jumpbox",
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "ConnectTimeout=999",
+        ]
+        .map(str::to_owned);
+        let mut command = Command::new("ssh.exe");
+        configure_ssh_options(&mut command, &user_arguments, 7, true);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=7",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=2",
+                "-F",
+                "custom.conf",
+                "-J",
+                "jumpbox",
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "ConnectTimeout=999",
+            ]
+        );
+    }
+
+    #[test]
+    fn holds_process_for_timeout_subprocess_test() {
+        if std::env::var_os(COMMAND_TIMEOUT_HELPER_ENV).is_none() {
+            return;
+        }
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn timed_command_is_terminated_and_reported() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "windows::tests::holds_process_for_timeout_subprocess_test",
+            ])
+            .env(COMMAND_TIMEOUT_HELPER_ENV, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW);
+
+        let started = Instant::now();
+        assert!(matches!(
+            command_output_with_timeout(&mut command, Duration::from_millis(200)).unwrap(),
+            TimedCommandOutput::TimedOut
+        ));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "command timed out too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "command timed out too late: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_slot_shortcuts_match_all_group_boundaries() {
+        let cases = [
+            (0, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F13_CODE),
+            (11, vec![VK_CONTROL, VK_MENU, VK_SHIFT], 0x87),
+            (12, vec![VK_CONTROL, VK_MENU], VK_F13_CODE),
+            (23, vec![VK_CONTROL, VK_MENU], 0x87),
+            (24, vec![VK_CONTROL, VK_SHIFT], VK_F13_CODE),
+            (35, vec![VK_CONTROL, VK_SHIFT], 0x87),
+            (36, vec![VK_MENU, VK_SHIFT], VK_F13_CODE),
+            (47, vec![VK_MENU, VK_SHIFT], 0x87),
+            (48, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F11_CODE),
+            (49, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F12_CODE),
+        ];
+        for (slot, modifiers, key) in cases {
+            assert_eq!(terminal_action_shortcut(slot).unwrap(), (modifiers, key));
+        }
+    }
+
+    #[test]
+    fn terminal_slot_shortcuts_are_unique_and_bounded() {
+        let mut shortcuts = HashSet::new();
+        for slot in 0..protocol::IMAGE_SLOT_COUNT {
+            assert!(shortcuts.insert(terminal_action_shortcut(slot).unwrap()));
+        }
+        assert_eq!(shortcuts.len(), protocol::IMAGE_SLOT_COUNT);
+        assert!(terminal_action_shortcut(protocol::IMAGE_SLOT_COUNT).is_err());
+    }
+
+    #[test]
+    fn image_layout_accepts_exact_limits() {
+        let width = 8_192;
+        let height = 8_192;
+        let raw_bytes = MAX_IMAGE_PIXELS * 4;
+        assert_eq!(
+            validate_image_layout(width, height, Some(raw_bytes)).unwrap(),
+            raw_bytes
+        );
+        assert!(
+            validate_image_layout(MAX_IMAGE_DIMENSION, 1, Some(MAX_IMAGE_DIMENSION * 4)).is_ok()
+        );
+    }
+
+    #[test]
+    fn image_layout_rejects_oversized_or_malformed_images() {
+        assert!(validate_image_layout(MAX_IMAGE_DIMENSION + 1, 1, None).is_err());
+        assert!(validate_image_layout(8_192, 8_193, None).is_err());
+        assert!(validate_image_layout(10, 10, Some(399)).is_err());
+        assert!(validate_image_layout(0, 10, None).is_err());
+        assert!(validate_image_layout(usize::MAX, 2, None).is_err());
+    }
+
+    #[test]
+    fn bounded_png_writer_never_exceeds_its_limit() {
+        let mut writer = BoundedBytes::new(4);
+        writer.write_all(&[1, 2, 3, 4]).unwrap();
+        assert!(writer.write_all(&[5]).is_err());
+        assert_eq!(writer.into_inner(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn emergency_release_count_tracks_inserted_key_down_events() {
+        let modifiers = [VK_CONTROL, VK_MENU, VK_SHIFT];
+        assert!(emergency_key_releases(&modifiers, VK_F13_CODE, 0).is_empty());
+        assert_eq!(emergency_key_releases(&modifiers, VK_F13_CODE, 2).len(), 2);
+        assert_eq!(emergency_key_releases(&modifiers, VK_F13_CODE, 4).len(), 4);
+    }
+
+    #[test]
+    fn receiver_capabilities_require_exact_stdout() {
+        assert!(receiver_capabilities_are_compatible(
+            protocol::CAPABILITIES.as_bytes()
+        ));
+        assert!(receiver_capabilities_are_compatible(
+            format!("{}\r\n", protocol::CAPABILITIES).as_bytes()
+        ));
+        assert!(!receiver_capabilities_are_compatible(
+            format!("remote banner\n{}", protocol::CAPABILITIES).as_bytes()
+        ));
+        assert!(!receiver_capabilities_are_compatible(
+            format!("{}\nextra output", protocol::CAPABILITIES).as_bytes()
+        ));
     }
 }

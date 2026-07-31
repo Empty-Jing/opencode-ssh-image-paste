@@ -11,7 +11,7 @@ Run the installed diagnostic command from Windows PowerShell:
 ```
 
 It checks the configuration file, OpenSSH client, Windows Terminal, SSH target,
-remote receiver version, and background client process. Fix the first reported
+remote receiver compatibility, and background client process. Fix the first reported
 failure before investigating later checks.
 
 ## Installer stops at `Testing SSH connection`
@@ -78,12 +78,13 @@ Check these conditions:
 
 Text-only clipboard content intentionally remains handled by Windows Terminal.
 
-## Receiver version check fails
+## Receiver compatibility check fails
 
 Verify the remote binary directly:
 
 ```powershell
 ssh.exe -n -T ubuntu-workbox "~/.local/bin/opencode-ssh-image-paste --version"
+ssh.exe -n -T ubuntu-workbox "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"
 ```
 
 If the binary is missing or has the wrong architecture, rerun `bootstrap.ps1`.
@@ -113,6 +114,39 @@ Keep the local configuration for a later reinstall:
 
 If the remote host cannot be reached, local uninstall still completes and prints
 a warning about the remaining receiver.
+
+## Measure image paste latency
+
+The background client writes one timing record for every intercepted image paste:
+
+```text
+%APPDATA%\OpenCodeSSHImagePaste\timing.log
+```
+
+Follow it live from PowerShell while testing:
+
+```powershell
+Get-Content "$env:APPDATA\OpenCodeSSHImagePaste\timing.log" -Wait -Tail 20
+```
+
+Each line reports `queue_ms`, `clipboard_read_ms`, `png_encode_ms`,
+`ssh_spawn_ms`, `upload_receiver_ms`, `modifier_wait_ms`, `terminal_paste_ms`,
+`input_guard_ms`, and `bridge_total_ms`. `output=terminal_action` confirms that the remote
+path was dispatched through its matching Windows Terminal slot action without replacing the clipboard. The record also includes image
+dimensions, raw and PNG byte counts, attempt counts, and whether the SSH connection
+was `cold`, `reused`, or `reconnected`.
+
+`ssh_spawn_ms` only measures creation of the local `ssh.exe` process. For a
+`cold` or `reconnected` request, SSH negotiation and receiver startup are part
+of `upload_receiver_ms` because the current protocol has no pre-upload ready
+message. `opencode_handoff_ms` and `opencode_handoff_unix_ms` mark when the
+synthetic paste was sent to Windows Terminal. OpenCode does not provide a
+completion callback, so the log records `opencode_completion=unobservable`;
+compare the handoff timestamp with when the attachment appears on screen.
+
+Successful and failed requests are both recorded. The active log rotates to
+`timing.log.1` after approximately 1 MiB and never includes clipboard pixels,
+remote paths, or SSH host names.
 
 ## Reporting a problem
 

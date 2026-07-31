@@ -2,11 +2,11 @@
 
 ## Supported Versions
 
-项目尚未发布稳定版本。安全修复只应用于默认分支的最新代码。
+项目仍处于 pre-1.0 阶段。安全修复只应用于默认分支的最新代码和维护者明确列出的受支持 Release。
 
 ## Reporting a Vulnerability
 
-公开仓库后，请使用 GitHub Private Vulnerability Reporting 提交安全问题，不要在公开 Issue 中附加私钥、主机地址、剪贴板内容或远端文件。
+如果仓库 Security 页面提供 Private Vulnerability Reporting，请优先通过该入口提交。若入口尚未启用，请只创建不含漏洞细节的公开 Issue，请求维护者提供私密联系方式。任何情况下都不要在公开 Issue 中附加私钥、主机地址、剪贴板内容、漏洞细节或远端文件。
 
 报告应包含：
 
@@ -22,4 +22,5 @@
 - Windows 客户端不保存密码或私钥。
 - Receiver 仅以当前 SSH 用户权限运行。
 - 图片目录权限为 `0700`，文件权限为 `0600`。
-- 单张图片上限为 16 MiB，receiver 会校验协议长度和 PNG 签名。
+- Receiver 对图片目录持有跨进程独占锁，避免并发连接覆盖同一槽位。
+- 编码后单张图片上限为 16 MiB；Windows client 在标准剪贴板解码器返回后限制图片边长、像素数和原始 RGBA 大小，因此这些限制不是解码峰值内存的硬上限；receiver 会在分配前校验协议长度并检查 PNG 签名。

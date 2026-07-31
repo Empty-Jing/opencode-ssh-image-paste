@@ -31,7 +31,7 @@
   <em>截图 → Ctrl+V → 图片出现在远端 OpenCode。</em>
 </p>
 
-普通 SSH 只传输终端字节流，不能携带 Windows 图片剪贴板。本工具在 Windows 本地读取图片，通过常驻 OpenSSH 子进程传到 Linux receiver，再把远端图片路径作为普通文本粘贴到 OpenCode。OpenCode 随后将该路径识别为图片附件。
+普通 SSH 只传输终端字节流，不能携带 Windows 图片剪贴板。本工具在 Windows 本地读取图片，通过常驻 OpenSSH 子进程传到 Linux receiver，再触发对应的私有 Windows Terminal `sendInput` Action，原子粘贴该图片的远端路径。OpenCode 会把该路径识别为图片附件，整个输出过程不会替换或恢复图片剪贴板。
 
 ## 快速开始
 
@@ -54,6 +54,9 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 按提示输入 SSH 主机或别名。安装器会检测 SSH、识别远端 Linux 架构、下载并校验
 Release 二进制、部署 Receiver、安装并启动 Windows Client、启用登录自启动，最后运行诊断。
 一键安装不需要 Rust，但 SSH 必须已经配置好无需交互输入密码的密钥或 `ssh-agent` 认证。
+
+发布的 x86_64 和 aarch64 Linux Receiver 使用 musl 静态链接，不依赖远端发行版的
+glibc 版本。
 
 如果希望先检查脚本再运行：
 
@@ -79,7 +82,7 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 & "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
 ```
 
-`doctor` 会检查配置、OpenSSH、Windows Terminal、SSH 连接、远端 Receiver 版本和后台 Client 进程。
+`doctor` 会检查配置、OpenSSH、Windows Terminal 及其私有粘贴 Action、SSH 连接、远端 Receiver 协议兼容性和后台 Client 进程。
 
 更新时重新执行同一条快速安装命令即可。安装器会保留已有配置，并替换本地 Client
 和远端 Receiver。
@@ -97,27 +100,27 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 
 ## 特性
 
-- 同一个 `Ctrl+V`：文本原样放行，只有纯图片剪贴板内容才进入桥接。
+- 只拦截精确的 `Ctrl+V`：文本以及 `Ctrl+Shift+V` 等带额外修饰键的组合原样放行，只有纯图片剪贴板内容才进入桥接。
+- 原子终端交接：bootstrap 增加 50 个私有槽位 Action，不替换 Windows Terminal 原有的 `Ctrl+V` 绑定。
 - 常驻 SSH：热路径不启动 PowerShell、SCP 或新的 SSH 进程。
 - 安全取消：上传期间切换窗口、Tab、pane、输入按键、改变鼠标焦点或复制新内容时，自动粘贴会被取消。
-- 私有落盘：receiver 目录权限为 `0700`，图片文件权限为 `0600`，receiver 创建的文件会在 24 小时后清理。
-- 有界协议：图片最大 16 MiB，响应最大 64 KiB。
+- 有界私有历史：每次只上传当前粘贴的一张图片；receiver 目录权限为 `0700`，以权限为 `0600` 的图片槽位保留最近 50 次成功粘贴；第 51 次成功粘贴覆盖最旧槽位。
+- 有界协议：编码后的图片最大 16 MiB；标准解码完成后校验边长、像素数和 RGBA 大小；响应最大 64 KiB。
 - 无额外凭据：复用 OpenSSH 配置、主机密钥校验、SSH key 或 `ssh-agent`。
 
 完整架构、协议、状态机和威胁模型参见 [`docs/design.md`](docs/design.md)。
 
 ## 工作原理
 
-```mermaid
-flowchart LR
-    A[Windows 图片 Ctrl+V] --> B[内存编码 PNG]
-    B --> C[常驻 OpenSSH]
-    C --> D[Linux receiver 私有落盘]
-    D --> E[返回绝对路径]
-    E --> F[复核焦点/输入/剪贴板]
-    F --> G[将路径粘贴到 Windows Terminal]
-    G --> H[OpenCode 图片附件]
-```
+<p align="center">
+  <img src="assets/readme-illustrations/02-how-it-works-zh.png" alt="Windows 截图穿过 SSH 隧道进入 Linux 私有存储，只有图片路径通过安全检查返回 OpenCode。" width="760">
+</p>
+
+1. **读取：** 按下 `Ctrl+V` 后，在 Windows 本地读取图片并在内存中编码为 PNG。
+2. **传输：** 常驻 OpenSSH 进程将 PNG 传到 Linux receiver 的 50 个私有槽位之一，并返回准确路径。
+3. **交接：** 焦点、输入和剪贴板安全检查通过后，Windows Terminal 将该路径原子发送给 OpenCode。
+
+返回 Windows 的只有一小段路径，原始图片剪贴板不会被替换。
 
 ## 故障排查
 
@@ -135,7 +138,7 @@ ssh -o BatchMode=yes -n -T ubuntu-workbox "printf ready"
 
 ## 手动构建与安装
 
-从源码构建需要支持 Rust 2024 edition 的 Rust/Cargo stable 工具链。
+从源码构建需要 Rust/Cargo 1.89 或更高版本，并支持 Rust 2024 edition。
 
 ### 安装 Linux Receiver
 
@@ -196,12 +199,14 @@ ssh ubuntu-workbox "test -x ~/.local/bin/opencode-ssh-image-paste && echo ready"
 
 ### 安装 Windows Client
 
-把 EXE 和 `install-windows.ps1` 放在同一目录：
+把 `bootstrap.ps1` 和 `install-windows.ps1` 放在同一目录，并提供从同一个
+commit 构建的 Windows client 与 Linux receiver 二进制：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -SshTarget ubuntu-workbox `
-  -BinaryPath .\opencode-ssh-image-paste.exe
+  -WindowsBinaryPath .\target\x86_64-pc-windows-msvc\release\opencode-ssh-image-paste.exe `
+  -LinuxBinaryPath .\target\release\opencode-ssh-image-paste
 ```
 
 安装位置：
@@ -212,7 +217,8 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
 自启动：当前用户 Startup 文件夹
 ```
 
-安装脚本不会覆盖已有配置。
+安装脚本会调用 `bootstrap.ps1`，只更新已有配置中的 SSH 目标和远端粘贴目录，
+保留其他设置，并安装用于原子粘贴图片路径的 50 个 Windows Terminal 私有 `sendInput` 槽位 Action。
 
 ## 配置
 
@@ -222,23 +228,24 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
 ssh_arguments = ["-F", "C:\\Users\\name\\.ssh\\config"]
 ```
 
-调整剪贴板恢复等待时间：
-
-```toml
-restore_clipboard_delay_ms = 250
-```
-
 调整 SSH/receiver 请求超时：
 
 ```toml
 request_timeout_seconds = 15
 ```
 
+自动安装使用 Receiver 的默认图片目录。如果现有 `remote_command` 是自定义命令
+（例如包含 `--dir`），安装器会在改动系统前明确拒绝，避免 Terminal Action 与实际
+上传目录不一致。自定义 Receiver 命令需要手工同步配置 Client 和 Terminal Action。
+
 ## 已知限制
 
 - 默认只拦截 Windows Terminal 的 `CASCADIA_HOSTING_WINDOW_CLASS`。
-- 图片检测支持注册格式 PNG 和 `CF_DIBV5`；只发布 `CF_DIB` 或 `CF_BITMAP` 的应用不会触发桥接。
+- Hook 无法按 SSH 主机区分 Tab；在任意 Windows Terminal Tab 中执行图片 `Ctrl+V`，都会上传到该 client 配置的唯一 SSH 目标。
+- 图片检测支持注册格式 PNG、`CF_DIBV5`、`CF_DIB` 和 `CF_BITMAP`；应用私有格式只有在 Windows 能将其合成为标准 Bitmap 时才可使用。
+- 标准 PNG/DIBV5 解码器可能在结果校验前分配内存，因此这些校验不是解码峰值内存的硬上限；协议和 receiver 仍会在分配前校验帧长度。
 - 同时包含文本与图片时按文本处理，避免改变原有粘贴语义。
+- 远端 50 个槽位会保留图片直到被覆盖或卸载；按每张 16 MiB 的协议上限计算，最坏约占 800 MiB，普通截图通常远小于该值。
 - Windows client 以无窗口后台进程运行，当前没有托盘菜单或图形化状态页；它仍会正常显示在 Windows 任务管理器中。
 - 提权 Windows Terminal 可能拒绝普通权限 client 的输入注入。
 
@@ -259,6 +266,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
 cargo check --tests --target x86_64-pc-windows-msvc
+pwsh -NoProfile -File ./tests/bootstrap.Tests.ps1
 ```
 
 贡献指南见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全问题报告方式见 [`SECURITY.md`](SECURITY.md)。

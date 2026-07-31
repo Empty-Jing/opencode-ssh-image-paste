@@ -7,10 +7,45 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify release tag and source version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          test "$GITHUB_REF_NAME" = "v$version"
+          grep -Fq "## [$version] - " CHANGELOG.md
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: clippy,rustfmt
+      - name: Install cargo-audit 0.22.2
+        run: cargo install cargo-audit --version '=0.22.2' --locked --no-default-features
+      - name: Audit Rust dependencies
+        run: cargo audit --deny warnings
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
   build:
+    needs: verify
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -20,15 +55,102 @@ jobs:
             source: target/release/opencode-ssh-image-paste.exe
           - runner: ubuntu-latest
             asset: opencode-ssh-image-paste-linux-x86_64
-            source: target/release/opencode-ssh-image-paste
+            target: x86_64-unknown-linux-musl
+            source: target/x86_64-unknown-linux-musl/release/opencode-ssh-image-paste
           - runner: ubuntu-24.04-arm
             asset: opencode-ssh-image-paste-linux-aarch64
-            source: target/release/opencode-ssh-image-paste
+            target: aarch64-unknown-linux-musl
+            source: target/aarch64-unknown-linux-musl/release/opencode-ssh-image-paste
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Validate PowerShell installer syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($script in @("./bootstrap.ps1", "./install-windows.ps1", "./tests/bootstrap.Tests.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List | Out-String | Write-Error
+              exit 1
+            }
+          }
+      - name: Test bootstrap JSONC and migration fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/bootstrap.Tests.ps1
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - run: cargo test --locked
+      - name: Install Linux musl build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools binutils
+      - name: Install Linux musl Rust target
+        if: runner.os == 'Linux'
+        run: rustup target add "${{ matrix.target }}"
+      - name: Build Windows MSVC release
+        if: runner.os == 'Windows'
+        run: cargo build --release --locked
+      - name: Smoke-test Windows release binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path "${{ matrix.source }}").Path
+          $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata failed"
+          }
+          $package = $metadata.packages | Where-Object name -CEQ "opencode-ssh-image-paste"
+          if ($null -eq $package) {
+            throw "opencode-ssh-image-paste package metadata is missing"
+          }
+          $version = ((& $binary --version 2>&1) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -cne "opencode-ssh-image-paste $($package.version)") {
+            throw "Unexpected version output: '$version'"
+          }
+          $capabilities = ((& $binary receiver --capabilities 2>&1) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0 -or $capabilities -cne "protocol=2;image_slots=50;response=slot-path-v1") {
+            throw "Unexpected capabilities output: '$capabilities'"
+          }
+      - name: Build static Linux release
+        if: runner.os == 'Linux'
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Verify Linux release has no ELF interpreter
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          binary="${{ matrix.source }}"
+          program_headers="$(readelf -lW "$binary")"
+          if [[ "$program_headers" == *INTERP* ]]; then
+            echo "::error::$binary contains a PT_INTERP segment and is not a static release binary"
+            printf '%s\n' "$program_headers"
+            exit 1
+          fi
+      - name: Smoke-test Linux release binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          binary="${{ matrix.source }}"
+          package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          version="$("$binary" --version)"
+          capabilities="$("$binary" receiver --capabilities)"
+          if [[ "$version" != "opencode-ssh-image-paste $package_version" ]]; then
+            echo "::error::Unexpected version output: '$version'"
+            exit 1
+          fi
+          if [[ "$capabilities" != "protocol=2;image_slots=50;response=slot-path-v1" ]]; then
+            echo "::error::Unexpected capabilities output: '$capabilities'"
+            exit 1
+          fi
       - name: Prepare release asset
         shell: bash
         run: cp "${{ matrix.source }}" "${{ matrix.asset }}"
@@ -42,17 +164,22 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Generate checksums
-        working-directory: dist
-        run: sha256sum opencode-ssh-image-paste-* > SHA256SUMS
       - name: Include bootstrap installer
         run: cp bootstrap.ps1 dist/bootstrap.ps1
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum opencode-ssh-image-paste-* bootstrap.ps1 > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

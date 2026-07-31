@@ -31,7 +31,7 @@
   <em>Capture → Ctrl+V → image appears in remote OpenCode.</em>
 </p>
 
-Regular SSH only transports terminal byte streams and cannot carry images from the Windows clipboard. This tool reads clipboard images locally on Windows, transfers them to a Linux receiver through a persistent OpenSSH subprocess, and pastes the resulting remote image path into OpenCode as regular text. OpenCode then recognizes the path as an image attachment.
+Regular SSH only transports terminal byte streams and cannot carry images from the Windows clipboard. This tool reads clipboard images locally on Windows, transfers them to a Linux receiver through a persistent OpenSSH subprocess, and invokes a private Windows Terminal `sendInput` action that atomically pastes the matching remote image path. OpenCode then recognizes the path as an image attachment. The image clipboard is never replaced or restored.
 
 ## Quick Start
 
@@ -55,6 +55,9 @@ Enter an SSH host or alias when prompted. The installer checks SSH, detects the
 remote Linux architecture, downloads checksum-verified release binaries, deploys
 the receiver, installs and starts the Windows client, enables startup at login,
 and runs diagnostics.
+
+Published Linux receivers for x86_64 and aarch64 are statically linked with
+musl, so they do not depend on the remote distribution's glibc version.
 
 For a non-interactive or auditable install, download the script first:
 
@@ -83,8 +86,9 @@ Check an existing installation at any time:
 & "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
 ```
 
-`doctor` checks the configuration, OpenSSH client, Windows Terminal, SSH
-connection, remote receiver version, and the background client process.
+`doctor` checks the configuration, OpenSSH client, Windows Terminal and its
+private paste action, SSH connection, remote receiver compatibility, and the
+background client process.
 
 To update, run the same quick-install command again. It keeps the existing
 configuration while replacing the local client and remote receiver.
@@ -103,27 +107,27 @@ missing, provide the remote explicitly with `-SshTarget ubuntu-workbox`.
 
 ## Features
 
-- One `Ctrl+V` shortcut: text passes through unchanged, while image-only clipboard content uses the bridge.
+- One exact `Ctrl+V` shortcut: text and modified combinations such as `Ctrl+Shift+V` pass through unchanged, while image-only clipboard content uses the bridge.
+- Atomic terminal handoff: bootstrap adds 50 private slot actions without replacing Windows Terminal's normal `Ctrl+V` binding.
 - Persistent SSH: the hot path does not start PowerShell, SCP, or a new SSH process.
 - Safe cancellation: automatic paste is cancelled if the user changes windows, tabs, panes, keyboard input, mouse focus, or clipboard content during upload.
-- Private storage: the receiver directory uses `0700`, image files use `0600`, and files created by the receiver are removed after 24 hours.
-- Bounded protocol: images are limited to 16 MiB and responses to 64 KiB.
+- Bounded private history: each paste uploads only its current image. The receiver directory uses `0700` and keeps the latest 50 successful pastes in `0600` image slots; the 51st successful paste replaces the oldest.
+- Bounded protocol: encoded images are limited to 16 MiB, decoded results are checked for dimension, pixel, and RGBA-size limits, and responses are limited to 64 KiB.
 - No additional credentials: authentication reuses OpenSSH configuration, host key verification, SSH keys, or `ssh-agent`.
 
 See [`docs/design.md`](docs/design.md) for the complete architecture, protocol, state machine, and threat model.
 
 ## How It Works
 
-```mermaid
-flowchart LR
-    A[Windows image Ctrl+V] --> B[Encode PNG in memory]
-    B --> C[Persistent OpenSSH]
-    C --> D[Linux receiver private storage]
-    D --> E[Return absolute path]
-    E --> F[Recheck focus/input/clipboard]
-    F --> G[Paste path into Windows Terminal]
-    G --> H[OpenCode image attachment]
-```
+<p align="center">
+  <img src="assets/readme-illustrations/01-how-it-works-en.png" alt="A Windows screenshot travels through an SSH tunnel into private Linux storage; only its path returns through a safety check to OpenCode." width="760">
+</p>
+
+1. **Capture:** `Ctrl+V` reads the Windows clipboard image and encodes it as PNG in memory.
+2. **Transfer:** A persistent OpenSSH process sends the PNG to one of 50 private Linux receiver slots and returns its exact path.
+3. **Hand off:** After focus, input, and clipboard safety checks pass, Windows Terminal atomically sends that path to OpenCode.
+
+Only the small path comes back. The original Windows image clipboard is never replaced.
 
 ## Troubleshooting
 
@@ -144,8 +148,8 @@ and complete uninstall instructions.
 
 ## Build and Install Manually
 
-Building from source requires a stable Rust/Cargo toolchain with Rust 2024
-edition support.
+Building from source requires Rust/Cargo 1.89 or newer with Rust 2024 edition
+support.
 
 ### Install the Linux Receiver
 
@@ -206,12 +210,14 @@ The command must print `ready` without stopping for a password or host confirmat
 
 ### Install the Windows Client
 
-Place the EXE and `install-windows.ps1` in the same directory:
+Keep `bootstrap.ps1` and `install-windows.ps1` together, then provide both a
+Windows client binary and a Linux receiver binary built from the same commit:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -SshTarget ubuntu-workbox `
-  -BinaryPath .\opencode-ssh-image-paste.exe
+  -WindowsBinaryPath .\target\x86_64-pc-windows-msvc\release\opencode-ssh-image-paste.exe `
+  -LinuxBinaryPath .\target\release\opencode-ssh-image-paste
 ```
 
 Installation paths:
@@ -222,7 +228,9 @@ Config:  %APPDATA%\OpenCodeSSHImagePaste\config.toml
 Startup: current user's Startup folder
 ```
 
-The installer does not overwrite an existing configuration.
+The installer delegates to `bootstrap.ps1`, updates the existing SSH target and
+paste directory while preserving other settings, and installs the 50 private
+Windows Terminal `sendInput` slot actions used for atomic image-path paste.
 
 ## Configuration
 
@@ -232,23 +240,25 @@ See [`config.example.toml`](config.example.toml) for the default configuration. 
 ssh_arguments = ["-F", "C:\\Users\\name\\.ssh\\config"]
 ```
 
-To adjust the clipboard restoration delay:
-
-```toml
-restore_clipboard_delay_ms = 250
-```
-
 To adjust the SSH/receiver request timeout:
 
 ```toml
 request_timeout_seconds = 15
 ```
 
+The automatic installer uses the receiver's default image directory. It rejects
+an existing custom `remote_command` (for example, one containing `--dir`) rather
+than installing Terminal actions that point at a different directory. Custom
+receiver commands require a manual, matching client and Terminal configuration.
+
 ## Known Limitations
 
 - By default, interception is limited to Windows Terminal's `CASCADIA_HOSTING_WINDOW_CLASS`.
-- Image detection supports the registered PNG format and `CF_DIBV5`; applications that only publish `CF_DIB` or `CF_BITMAP` do not trigger the bridge.
+- The hook cannot distinguish tabs by SSH host. An image `Ctrl+V` in any Windows Terminal tab uploads to the single target configured for this client.
+- Image detection supports registered PNG, `CF_DIBV5`, `CF_DIB`, and `CF_BITMAP`; application-private formats work only when Windows can synthesize a standard bitmap from them.
+- The standard PNG/DIBV5 decoder may allocate before decoded-result limits are checked, so those checks are not a hard peak-memory ceiling; protocol and receiver frame lengths are still validated before allocation.
 - Clipboard content containing both text and images is treated as text to preserve existing paste semantics.
+- The 50 remote slots retain images until they are overwritten or uninstalled. At the 16 MiB protocol maximum they can use up to about 800 MiB in total; normal screenshots are usually much smaller.
 - The Windows client runs as a windowless background process and currently has no tray menu or graphical status page. It remains visible in Windows Task Manager.
 - An elevated Windows Terminal may reject input injection from a client running without elevation.
 
@@ -269,6 +279,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
 cargo check --tests --target x86_64-pc-windows-msvc
+pwsh -NoProfile -File ./tests/bootstrap.Tests.ps1
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution guidance and [`SECURITY.md`](SECURITY.md) for security reporting.
