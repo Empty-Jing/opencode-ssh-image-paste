@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-31
+
 ### Added
 
 - One-command uninstall through `bootstrap.ps1 -Uninstall`, including local and remote cleanup.
@@ -48,7 +50,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `doctor` diagnostics and one-command Windows/Linux bootstrap installation.
 - Release binaries for Windows x86_64, Linux x86_64, and Linux aarch64 with SHA-256 checksums.
 
-[Unreleased]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/tag/v0.1.1
