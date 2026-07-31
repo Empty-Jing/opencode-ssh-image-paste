@@ -1,87 +1,89 @@
 # OpenCode SSH Image Paste
 
+English | [简体中文](README.zh-CN.md)
+
 Paste screenshots from the Windows clipboard into an OpenCode TUI running on a remote Linux host over SSH. Text paste keeps its existing behavior; image paste uses the same `Ctrl+V` shortcut.
 
-适用链路：
+Supported workflow:
 
 ```text
 Windows Terminal -> SSH -> Linux -> Herdr -> OpenCode TUI
 ```
 
-普通 SSH 只传输终端字节流，不能携带 Windows 图片剪贴板。本工具在 Windows 本地读取图片，通过常驻 OpenSSH 子进程传到 Linux receiver，再把远端图片路径作为一次普通粘贴送入 OpenCode。OpenCode 会将路径识别为图片附件。
+Regular SSH only transports terminal byte streams and cannot carry images from the Windows clipboard. This tool reads clipboard images locally on Windows, transfers them to a Linux receiver through a persistent OpenSSH subprocess, and pastes the resulting remote image path into OpenCode as regular text. OpenCode then recognizes the path as an image attachment.
 
-## 特性
+## Features
 
-- 同一个 `Ctrl+V`：文本原样放行，纯图片才进入桥接。
-- 常驻 SSH：热路径不启动 PowerShell、SCP 或新的 SSH 进程。
-- 安全取消：上传期间切换窗口、Tab、pane、输入按键、点击鼠标或复制新内容时不自动粘贴。
-- 私有落盘：receiver 目录 `0700`、文件 `0600`，每小时清理超过 24 小时的自身命名文件。
-- 有界协议：图片最大 16 MiB，响应最大 64 KiB。
-- 无额外凭据：复用 OpenSSH 配置、主机密钥校验、SSH key 或 `ssh-agent`。
+- One `Ctrl+V` shortcut: text passes through unchanged, while image-only clipboard content uses the bridge.
+- Persistent SSH: the hot path does not start PowerShell, SCP, or a new SSH process.
+- Safe cancellation: automatic paste is cancelled if the user changes windows, tabs, panes, keyboard input, mouse focus, or clipboard content during upload.
+- Private storage: the receiver directory uses `0700`, image files use `0600`, and files created by the receiver are removed after 24 hours.
+- Bounded protocol: images are limited to 16 MiB and responses to 64 KiB.
+- No additional credentials: authentication reuses OpenSSH configuration, host key verification, SSH keys, or `ssh-agent`.
 
-完整架构、协议、状态机和威胁模型参见 [`docs/design.md`](docs/design.md)。
+See [`docs/design.md`](docs/design.md) for the complete architecture, protocol, state machine, and threat model.
 
-## 工作原理
+## How It Works
 
 ```mermaid
 flowchart LR
-    A[Windows 图片 Ctrl+V] --> B[内存 PNG 编码]
-    B --> C[常驻 OpenSSH]
-    C --> D[Linux receiver 私有落盘]
-    D --> E[返回绝对路径]
-    E --> F[复核焦点/输入/剪贴板]
-    F --> G[Windows Terminal 路径粘贴]
-    G --> H[OpenCode Image attachment]
+    A[Windows image Ctrl+V] --> B[Encode PNG in memory]
+    B --> C[Persistent OpenSSH]
+    C --> D[Linux receiver private storage]
+    D --> E[Return absolute path]
+    E --> F[Recheck focus/input/clipboard]
+    F --> G[Paste path into Windows Terminal]
+    G --> H[OpenCode image attachment]
 ```
 
-## 前置条件
+## Requirements
 
-- Windows 10/11 和 Windows Terminal；
-- Windows OpenSSH Client；
-- Linux OpenSSH Server；
-- Windows 到 Linux 已配置非交互 SSH key 或 `ssh-agent`；
-- OpenCode 使用支持图片输入的模型。
-- 从源码安装 receiver 时，Linux 需要支持 Rust 2024 edition 的 Rust/Cargo stable 工具链。
+- Windows 10/11 and Windows Terminal.
+- Windows OpenSSH Client.
+- Linux OpenSSH Server.
+- Non-interactive SSH key or `ssh-agent` authentication from Windows to Linux.
+- An OpenCode model that supports image input.
+- A stable Rust/Cargo toolchain with Rust 2024 edition support when building the receiver from source.
 
-## 安装 Linux Receiver
+## Install the Linux Receiver
 
-在 Linux 仓库目录执行：
+Run from the repository directory on Linux:
 
 ```bash
 ./install-linux.sh
 test -x ~/.local/bin/opencode-ssh-image-paste
 ```
 
-Receiver 默认将图片保存到：
+The receiver stores images in:
 
 ```text
 ~/.cache/opencode-ssh-image-paste/
 ```
 
-## 构建 Windows Client
+## Build the Windows Client
 
-在 Linux 上交叉构建：
+Cross-compile on Linux:
 
 ```bash
 cargo install cargo-xwin --locked
 cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
-产物：
+Output:
 
 ```text
 target/x86_64-pc-windows-msvc/release/opencode-ssh-image-paste.exe
 ```
 
-也可在安装 Rust 和 Visual Studio Build Tools 的 Windows 主机执行：
+Alternatively, build on Windows with Rust and Visual Studio Build Tools installed:
 
 ```powershell
 cargo build --release
 ```
 
-## 配置 SSH
+## Configure SSH
 
-在 `%USERPROFILE%\.ssh\config` 中准备可免交互连接的 Host：
+Create a host entry with non-interactive authentication in `%USERPROFILE%\.ssh\config`:
 
 ```sshconfig
 Host ubuntu-workbox
@@ -92,17 +94,17 @@ Host ubuntu-workbox
     ServerAliveCountMax 3
 ```
 
-验证 receiver 和认证：
+Verify the receiver and authentication:
 
 ```powershell
 ssh ubuntu-workbox "test -x ~/.local/bin/opencode-ssh-image-paste && echo ready"
 ```
 
-命令必须输出 `ready`，不能停在密码或主机确认提示。
+The command must print `ready` without stopping for a password or host confirmation prompt.
 
-## 安装 Windows Client
+## Install the Windows Client
 
-把 EXE 和 `install-windows.ps1` 放在同一目录：
+Place the EXE and `install-windows.ps1` in the same directory:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
@@ -110,55 +112,55 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -BinaryPath .\opencode-ssh-image-paste.exe
 ```
 
-安装位置：
+Installation paths:
 
 ```text
-程序：%LOCALAPPDATA%\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe
-配置：%APPDATA%\OpenCodeSSHImagePaste\config.toml
-自启动：当前用户 Startup 文件夹
+Program: %LOCALAPPDATA%\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe
+Config:  %APPDATA%\OpenCodeSSHImagePaste\config.toml
+Startup: current user's Startup folder
 ```
 
-安装脚本不会覆盖已有配置。
+The installer does not overwrite an existing configuration.
 
-## 使用
+## Usage
 
-1. 从 Windows Terminal SSH 到 Linux，在 Herdr 中启动 OpenCode。
-2. 使用 `Win+Shift+S` 截图。
-3. 回到原 Windows Terminal 窗口。
-4. 按原来的 `Ctrl+V`。
-5. OpenCode 输入框应出现 `[Image 1]`。
+1. Connect from Windows Terminal to Linux over SSH and start OpenCode inside Herdr.
+2. Capture a screenshot with `Win+Shift+S`.
+3. Return to the original Windows Terminal window.
+4. Press the usual `Ctrl+V` shortcut.
+5. The OpenCode input should show `[Image 1]`.
 
-文本剪贴板仍由 Windows Terminal 直接粘贴，不经过图片通道。
+Text clipboard content continues to be pasted directly by Windows Terminal and does not use the image channel.
 
-## 配置
+## Configuration
 
-默认配置参见 [`config.example.toml`](config.example.toml)。指定独立 SSH 配置文件：
+See [`config.example.toml`](config.example.toml) for the default configuration. To use a separate SSH configuration file:
 
 ```toml
 ssh_arguments = ["-F", "C:\\Users\\name\\.ssh\\config"]
 ```
 
-调整剪贴板恢复等待时间：
+To adjust the clipboard restoration delay:
 
 ```toml
 restore_clipboard_delay_ms = 250
 ```
 
-调整 SSH/receiver 请求超时：
+To adjust the SSH/receiver request timeout:
 
 ```toml
 request_timeout_seconds = 15
 ```
 
-## 已知限制
+## Known Limitations
 
-- 默认只拦截 Windows Terminal 的 `CASCADIA_HOSTING_WINDOW_CLASS`。
-- 图片格式支持注册格式 PNG 和 `CF_DIBV5`；只发布 `CF_DIB`/`CF_BITMAP` 的应用不会触发桥接。
-- 同时包含文本与图片时优先文本，避免改变原文本粘贴语义。
-- Windows client 当前是最小化控制台程序，没有托盘菜单。
-- 提权 Windows Terminal 可能拒绝普通权限 client 的输入注入。
+- By default, interception is limited to Windows Terminal's `CASCADIA_HOSTING_WINDOW_CLASS`.
+- Image detection supports the registered PNG format and `CF_DIBV5`; applications that only publish `CF_DIB` or `CF_BITMAP` do not trigger the bridge.
+- Clipboard content containing both text and images is treated as text to preserve existing paste semantics.
+- The Windows client is currently a minimized console application without a tray menu.
+- An elevated Windows Terminal may reject input injection from a client running without elevation.
 
-## 开发
+## Development
 
 ```bash
 cargo fmt --check
@@ -167,7 +169,7 @@ cargo test --locked
 cargo check --tests --target x86_64-pc-windows-msvc
 ```
 
-贡献指南见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，安全问题报告方式见 [`SECURITY.md`](SECURITY.md)。
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution guidance and [`SECURITY.md`](SECURITY.md) for security reporting.
 
 ## License
 
