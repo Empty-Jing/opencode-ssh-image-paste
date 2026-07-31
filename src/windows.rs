@@ -4,6 +4,7 @@ use arboard::{Clipboard, ImageData};
 use serde::Deserialize;
 use std::fs;
 use std::io::{BufReader, BufWriter};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,7 +19,9 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, KEYEVENTF_KEYUP, VK_CONTROL, VK_SHIFT, VK_V, keybd_event,
 };
@@ -532,6 +535,7 @@ impl Transport {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .with_context(|| format!("start {}", self.ssh_program))?;
         let input = BufWriter::new(child.stdin.take().context("SSH stdin is unavailable")?);

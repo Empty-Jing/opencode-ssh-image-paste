@@ -204,7 +204,7 @@ flowchart TD
     Retry --> Spawn
 ```
 
-客户端强制启用 `BatchMode=yes`，要求使用 SSH key 或 `ssh-agent`。连接、写入或响应失败时，当前请求最多重连并重传一次；第二次失败后结束当前请求，下一次图片粘贴再建立新连接。OpenSSH 负责加密、主机密钥校验和身份认证；本工具不实现自有加密或凭据存储。
+客户端强制启用 `BatchMode=yes`，要求使用 SSH key 或 `ssh-agent`。Windows client 使用 `CREATE_NO_WINDOW` 启动 OpenSSH 子进程，避免无窗口 client 首次粘贴时由 `ssh.exe` 创建控制台并抢走前台焦点。连接、写入或响应失败时，当前请求最多重连并重传一次；第二次失败后结束当前请求，下一次图片粘贴再建立新连接。OpenSSH 负责加密、主机密钥校验和身份认证；本工具不实现自有加密或凭据存储。
 
 ## 11. 威胁模型
 
@@ -224,7 +224,7 @@ flowchart TD
 - Windows client 当前只支持 Windows Terminal 的窗口 class，可通过配置覆盖，但其他终端未验证。
 - 图片检测与读取支持注册格式 PNG 和 `CF_DIBV5`；只发布传统 `CF_DIB`/`CF_BITMAP` 的应用不会触发桥接。
 - 同时包含文本与图片格式时优先文本，避免破坏原文本 `Ctrl+V`。
-- Windows client 当前是最小化控制台程序，没有托盘菜单和图形化状态页。
+- Windows client 通过 Windows GUI subsystem 以无窗口后台进程运行，不显示控制台或任务栏窗口，当前没有托盘菜单和图形化状态页；进程仍会正常显示在 Windows 任务管理器中。
 - 自动粘贴依赖目标 Terminal 与 client 处于相同完整性级别；提权 Terminal 可能拒绝输入注入。
 - Linux receiver 已自动化测试；真实 Windows 输入、剪贴板和 Windows Terminal 行为仍需在发布前执行手工兼容性矩阵。
 - Watchdog 通过 Win32 `TerminateProcess` 尽力中止超时 SSH；操作系统拒绝进程访问时无法形成严格超时保证。

@@ -157,7 +157,7 @@ request_timeout_seconds = 15
 - By default, interception is limited to Windows Terminal's `CASCADIA_HOSTING_WINDOW_CLASS`.
 - Image detection supports the registered PNG format and `CF_DIBV5`; applications that only publish `CF_DIB` or `CF_BITMAP` do not trigger the bridge.
 - Clipboard content containing both text and images is treated as text to preserve existing paste semantics.
-- The Windows client is currently a minimized console application without a tray menu.
+- The Windows client runs as a windowless background process and currently has no tray menu or graphical status page. It remains visible in Windows Task Manager.
 - An elevated Windows Terminal may reject input injection from a client running without elevation.
 
 ## Development

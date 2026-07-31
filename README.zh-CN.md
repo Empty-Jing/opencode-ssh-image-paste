@@ -157,7 +157,7 @@ request_timeout_seconds = 15
 - 默认只拦截 Windows Terminal 的 `CASCADIA_HOSTING_WINDOW_CLASS`。
 - 图片检测支持注册格式 PNG 和 `CF_DIBV5`；只发布 `CF_DIB` 或 `CF_BITMAP` 的应用不会触发桥接。
 - 同时包含文本与图片时按文本处理，避免改变原有粘贴语义。
-- Windows client 当前是最小化控制台程序，没有托盘菜单。
+- Windows client 以无窗口后台进程运行，当前没有托盘菜单或图形化状态页；它仍会正常显示在 Windows 任务管理器中。
 - 提权 Windows Terminal 可能拒绝普通权限 client 的输入注入。
 
 ## 开发
