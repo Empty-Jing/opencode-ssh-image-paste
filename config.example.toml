@@ -1,0 +1,10 @@
+# SSH Host alias from %USERPROFILE%\.ssh\config.
+ssh_target = "ubuntu-workbox"
+
+# These defaults normally do not need to be changed.
+ssh_program = "ssh.exe"
+ssh_arguments = []
+remote_command = "~/.local/bin/opencode-ssh-image-paste receiver"
+terminal_window_class = "CASCADIA_HOSTING_WINDOW_CLASS"
+restore_clipboard_delay_ms = 150
+request_timeout_seconds = 15
