@@ -1,6 +1,6 @@
 [package]
 name = "opencode-ssh-image-paste"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Paste Windows clipboard images into a remote OpenCode TUI over SSH"
 license = "MIT"

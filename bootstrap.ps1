@@ -23,26 +23,16 @@ function ConvertTo-TomlBasicString([string]$Value) {
     return '"' + $escaped + '"'
 }
 
-function Get-Release {
-    $headers = @{ "User-Agent" = "opencode-ssh-image-paste-bootstrap" }
+function Get-DownloadBase {
     if ($Version -eq "latest") {
-        return Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repository/releases/latest"
+        return "https://github.com/$Repository/releases/latest/download"
     }
     $tag = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
-    return Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$Repository/releases/tags/$tag"
+    return "https://github.com/$Repository/releases/download/$tag"
 }
 
-function Get-Asset($Release, [string]$Name) {
-    $asset = $Release.assets | Where-Object { $_.name -eq $Name } | Select-Object -First 1
-    if (-not $asset) {
-        throw "Release asset not found: $Name"
-    }
-    return $asset
-}
-
-function Download-Asset($Release, [string]$Name, [string]$Destination) {
-    $asset = Get-Asset $Release $Name
-    Invoke-WebRequest -UseBasicParsing -Uri $asset.browser_download_url -OutFile $Destination
+function Download-Asset([string]$BaseUri, [string]$Name, [string]$Destination) {
+    Invoke-WebRequest -UseBasicParsing -Uri "$BaseUri/$Name" -OutFile $Destination
 }
 
 function Assert-Checksum([string]$File, [string]$ChecksumsFile, [string]$AssetName) {
@@ -77,8 +67,11 @@ $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("opencode-ssh-image-past
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 try {
+    Get-Process $ProgramName -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Milliseconds 250
+
     Write-Step "Testing SSH connection to $SshTarget"
-    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 -- $SshTarget "printf 'ready\n'"
+    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 -- $SshTarget "echo ready"
     if ($LASTEXITCODE -ne 0) {
         throw "SSH connection failed. Configure a host key and non-interactive key or ssh-agent authentication first."
     }
@@ -93,19 +86,18 @@ try {
         default { throw "Unsupported remote architecture: $remoteArchitecture" }
     }
 
-    Write-Step "Finding release $Version"
-    $release = Get-Release
+    $downloadBase = Get-DownloadBase
     $windowsAsset = "$ProgramName-windows-x86_64.exe"
     $checksumsAsset = "SHA256SUMS"
     $windowsDownload = Join-Path $TempDir $windowsAsset
     $linuxDownload = Join-Path $TempDir $linuxAsset
     $checksumsDownload = Join-Path $TempDir $checksumsAsset
 
-    Write-Step "Downloading $($release.tag_name) binaries"
-    Download-Asset $release $windowsAsset $windowsDownload
-    Download-Asset $release $linuxAsset $linuxDownload
+    Write-Step "Downloading $Version release binaries"
+    Download-Asset $downloadBase $windowsAsset $windowsDownload
+    Download-Asset $downloadBase $linuxAsset $linuxDownload
     if (-not $SkipChecksum) {
-        Download-Asset $release $checksumsAsset $checksumsDownload
+        Download-Asset $downloadBase $checksumsAsset $checksumsDownload
         Assert-Checksum $windowsDownload $checksumsDownload $windowsAsset
         Assert-Checksum $linuxDownload $checksumsDownload $linuxAsset
     }
