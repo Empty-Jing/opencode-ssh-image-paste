@@ -71,12 +71,12 @@ try {
     Start-Sleep -Milliseconds 250
 
     Write-Step "Testing SSH connection to $SshTarget"
-    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 -- $SshTarget "echo ready"
+    & ssh.exe -n -T -o BatchMode=yes -o ConnectTimeout=10 -- $SshTarget "echo ready"
     if ($LASTEXITCODE -ne 0) {
         throw "SSH connection failed. Configure a host key and non-interactive key or ssh-agent authentication first."
     }
 
-    $remoteArchitecture = (& ssh.exe -o BatchMode=yes -- $SshTarget "uname -m").Trim()
+    $remoteArchitecture = (& ssh.exe -n -T -o BatchMode=yes -- $SshTarget "uname -m").Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "Could not detect the remote architecture."
     }
@@ -104,11 +104,11 @@ try {
 
     Write-Step "Installing Linux receiver ($remoteArchitecture)"
     $remoteTemporary = ".local/bin/$ProgramName.download"
-    & ssh.exe -o BatchMode=yes -- $SshTarget "mkdir -p ~/.local/bin"
+    & ssh.exe -n -T -o BatchMode=yes -- $SshTarget "mkdir -p ~/.local/bin"
     if ($LASTEXITCODE -ne 0) { throw "Could not create ~/.local/bin on the remote host." }
     & scp.exe -q -- $linuxDownload "${SshTarget}:$remoteTemporary"
     if ($LASTEXITCODE -ne 0) { throw "Could not upload the Linux receiver." }
-    & ssh.exe -o BatchMode=yes -- $SshTarget "chmod 755 ~/$remoteTemporary && mv -f ~/$remoteTemporary ~/.local/bin/$ProgramName && ~/.local/bin/$ProgramName --version"
+    & ssh.exe -n -T -o BatchMode=yes -- $SshTarget "chmod 755 ~/$remoteTemporary && mv -f ~/$remoteTemporary ~/.local/bin/$ProgramName && ~/.local/bin/$ProgramName --version"
     if ($LASTEXITCODE -ne 0) { throw "Could not activate the Linux receiver." }
 
     Write-Step "Installing Windows client"

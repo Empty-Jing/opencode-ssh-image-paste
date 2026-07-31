@@ -221,6 +221,7 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
             .arg("BatchMode=yes")
             .arg("-o")
             .arg(format!("ConnectTimeout={}", config.request_timeout_seconds))
+            .arg("-T")
             .arg(&config.ssh_target)
             .arg(&config.remote_probe_command)
             .stdin(Stdio::null())
