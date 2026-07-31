@@ -75,7 +75,7 @@ To check an existing installation:
 ```
 
 `doctor` checks the configuration, OpenSSH client, Windows Terminal, SSH
-connection, remote receiver startup, and the background client process.
+connection, remote receiver version, and the background client process.
 
 ## Build and Install Manually
 

@@ -78,7 +78,7 @@ New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 try {
     Write-Step "Testing SSH connection to $SshTarget"
-    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 -- $SshTarget "printf ready"
+    & ssh.exe -o BatchMode=yes -o ConnectTimeout=10 -- $SshTarget "printf 'ready\n'"
     if ($LASTEXITCODE -ne 0) {
         throw "SSH connection failed. Configure a host key and non-interactive key or ssh-agent authentication first."
     }
@@ -133,6 +133,7 @@ ssh_target = $target
 ssh_program = "ssh.exe"
 ssh_arguments = []
 remote_command = "~/.local/bin/opencode-ssh-image-paste receiver"
+remote_probe_command = "~/.local/bin/opencode-ssh-image-paste --version"
 terminal_window_class = "CASCADIA_HOSTING_WINDOW_CLASS"
 restore_clipboard_delay_ms = 150
 request_timeout_seconds = 15
@@ -142,6 +143,10 @@ request_timeout_seconds = 15
         $existingConfig = Get-Content -Raw $ConfigPath
         if ($existingConfig -match '(?m)^ssh_target\s*=') {
             $existingConfig = $existingConfig -replace '(?m)^ssh_target\s*=.*$', "ssh_target = $target"
+            if ($existingConfig -notmatch '(?m)^remote_probe_command\s*=') {
+                $probeSetting = 'remote_probe_command = "~/.local/bin/opencode-ssh-image-paste --version"'
+                $existingConfig = $existingConfig -replace '(?m)^(remote_command\s*=.*)$', ("`$1`r`n" + $probeSetting)
+            }
             Set-Content -Encoding UTF8 -Path $ConfigPath -Value $existingConfig
         } else {
             throw "Existing configuration has no ssh_target: $ConfigPath"
@@ -157,7 +162,7 @@ request_timeout_seconds = 15
     $shortcut.WindowStyle = 7
     $shortcut.Save()
 
-    Start-Process -FilePath $InstalledBinary -ArgumentList @("client", "`"$ConfigPath`"") -WindowStyle Minimized
+    Start-Process -FilePath $InstalledBinary -ArgumentList @("client", "`"$ConfigPath`"") -WindowStyle Hidden
     Start-Sleep -Milliseconds 500
 
     Write-Step "Running diagnostics"

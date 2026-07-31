@@ -12,6 +12,7 @@ use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{CloseHandle, GlobalFree, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::System::Console::FreeConsole;
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -58,6 +59,7 @@ struct Config {
     ssh_program: String,
     ssh_arguments: Vec<String>,
     remote_command: String,
+    remote_probe_command: String,
     terminal_window_class: String,
     restore_clipboard_delay_ms: u64,
     request_timeout_seconds: u64,
@@ -70,6 +72,7 @@ impl Default for Config {
             ssh_program: "ssh.exe".into(),
             ssh_arguments: Vec::new(),
             remote_command: "~/.local/bin/opencode-ssh-image-paste receiver".into(),
+            remote_probe_command: "~/.local/bin/opencode-ssh-image-paste --version".into(),
             terminal_window_class: DEFAULT_WINDOW_CLASS.into(),
             restore_clipboard_delay_ms: 150,
             request_timeout_seconds: 15,
@@ -78,6 +81,9 @@ impl Default for Config {
 }
 
 pub fn run(config_path: Option<PathBuf>) -> Result<()> {
+    // Client mode is a background process. The same executable remains a console
+    // application so commands such as `doctor` can print useful diagnostics.
+    unsafe { FreeConsole() };
     let config_path = config_path.unwrap_or_else(default_config_path);
     let config = load_config(&config_path)?;
     anyhow::ensure!(
@@ -216,7 +222,7 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
             .arg("-o")
             .arg(format!("ConnectTimeout={}", config.request_timeout_seconds))
             .arg(&config.ssh_target)
-            .arg(&config.remote_command)
+            .arg(&config.remote_probe_command)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -225,7 +231,7 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
             Ok(output) if output.status.success() => check(
                 "Remote receiver",
                 true,
-                "SSH connection and receiver startup succeeded",
+                "SSH connection and receiver version check succeeded",
                 &mut failures,
             ),
             Ok(output) => {

@@ -70,7 +70,7 @@ iwr https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/b
 & "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
 ```
 
-`doctor` 会检查配置、OpenSSH、Windows Terminal、SSH 连接、远端 Receiver 和后台 Client 进程。
+`doctor` 会检查配置、OpenSSH、Windows Terminal、SSH 连接、远端 Receiver 版本和后台 Client 进程。
 
 ## 手动构建与安装
 

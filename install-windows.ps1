@@ -32,6 +32,7 @@ ssh_target = $sshTargetToml
 ssh_program = "ssh.exe"
 ssh_arguments = []
 remote_command = $remoteCommandToml
+remote_probe_command = "~/.local/bin/opencode-ssh-image-paste --version"
 terminal_window_class = "CASCADIA_HOSTING_WINDOW_CLASS"
 restore_clipboard_delay_ms = 150
 request_timeout_seconds = 15
@@ -48,7 +49,7 @@ $shortcut.WorkingDirectory = $installDir
 $shortcut.WindowStyle = 7
 $shortcut.Save()
 
-Start-Process -FilePath $installedBinary -ArgumentList @("client", "`"$configPath`"") -WindowStyle Minimized
+Start-Process -FilePath $installedBinary -ArgumentList @("client", "`"$configPath`"") -WindowStyle Hidden
 Write-Host "Installed Windows client: $installedBinary"
 Write-Host "Config: $configPath"
 Write-Host "The bridge now starts automatically after Windows login."
