@@ -38,6 +38,36 @@ jobs:
             $errors | Format-List | Out-String | Write-Error
             exit 1
           }
+      - name: Test bootstrap uninstall
+        shell: pwsh
+        run: |
+          $testRoot = Join-Path $env:RUNNER_TEMP "bootstrap-uninstall-test"
+          $env:LOCALAPPDATA = Join-Path $testRoot "LocalAppData"
+          $env:APPDATA = Join-Path $testRoot "AppData"
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\OpenCodeSSHImagePaste"
+          $configDir = Join-Path $env:APPDATA "OpenCodeSSHImagePaste"
+
+          try {
+            New-Item -ItemType Directory -Force -Path $installDir, $configDir | Out-Null
+            Set-Content -Path (Join-Path $installDir "opencode-ssh-image-paste.exe") -Value "test"
+            Set-Content -Path (Join-Path $configDir "config.toml") -Value "test = true"
+
+            & ./bootstrap.ps1 -Uninstall
+            if (Test-Path $installDir) { throw "Uninstall did not remove the install directory." }
+            if (Test-Path $configDir) { throw "Uninstall did not remove the config directory." }
+
+            New-Item -ItemType Directory -Force -Path $installDir, $configDir | Out-Null
+            Set-Content -Path (Join-Path $installDir "opencode-ssh-image-paste.exe") -Value "test"
+            Set-Content -Path (Join-Path $configDir "config.toml") -Value "test = true"
+
+            & ./bootstrap.ps1 -Uninstall -KeepConfig
+            if (Test-Path $installDir) { throw "Uninstall did not remove the install directory." }
+            if (-not (Test-Path (Join-Path $configDir "config.toml"))) {
+              throw "-KeepConfig did not preserve the configuration."
+            }
+          } finally {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $testRoot
+          }
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt

@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">OpenCode SSH Image Paste</title>
+  <desc id="desc">Paste Windows screenshots into remote OpenCode with Ctrl+V over SSH.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#06101A"/>
+      <stop offset="1" stop-color="#0B1B2A"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#17334A" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#38BDF8"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <rect width="1280" height="640" fill="url(#grid)" opacity=".52"/>
+  <circle cx="1110" cy="90" r="280" fill="#0EA5E9" opacity=".08"/>
+  <circle cx="90" cy="610" r="220" fill="#22D3EE" opacity=".05"/>
+
+  <g transform="translate(72 66)">
+    <rect width="306" height="38" rx="19" fill="#0B2132" stroke="#2C607D"/>
+    <circle cx="22" cy="19" r="5" fill="#4ADE80"/>
+    <text x="40" y="25" fill="#A5DDF5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="700" letter-spacing="1.4">OPENCODE SSH IMAGE PASTE</text>
+
+    <text x="0" y="148" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="76" font-weight="780" letter-spacing="-3">Ctrl+V over SSH.</text>
+    <rect x="0" y="174" width="510" height="7" rx="3.5" fill="url(#accent)"/>
+
+    <text x="0" y="238" fill="#D7E3EC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="29" font-weight="560">Paste Windows screenshots into</text>
+    <text x="0" y="278" fill="#D7E3EC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="29" font-weight="560">OpenCode running on remote Linux.</text>
+
+    <text x="0" y="330" fill="#7F9AAD" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20">Same shortcut · Persistent OpenSSH · No Rust required</text>
+
+    <g transform="translate(0 378)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+      <rect width="548" height="96" rx="18" fill="#07121D" stroke="#244A64"/>
+      <circle cx="24" cy="22" r="4" fill="#38BDF8"/><circle cx="39" cy="22" r="4" fill="#315168"/><circle cx="54" cy="22" r="4" fill="#315168"/>
+      <text x="24" y="61" fill="#38BDF8" font-size="17">PS&gt;</text>
+      <text x="68" y="61" fill="#D7E3EC" font-size="17">.\bootstrap.ps1 -SshTarget myserver</text>
+      <text x="461" y="61" fill="#4ADE80" font-size="17">ready</text>
+    </g>
+  </g>
+
+  <g transform="translate(704 73)">
+    <g>
+      <rect width="472" height="136" rx="22" fill="#0A1A28" stroke="#2C607D"/>
+      <rect x="24" y="25" width="86" height="86" rx="16" fill="#102B40" stroke="#38BDF8" stroke-width="2"/>
+      <path d="M43 88l18-23 14 17 12-14 16 20" fill="none" stroke="#7DD3FC" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="89" cy="50" r="7" fill="#FBBF24"/>
+      <text x="136" y="57" fill="#7896AA" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" letter-spacing="1.5">WINDOWS</text>
+      <text x="136" y="90" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="26" font-weight="650">Capture a screenshot</text>
+    </g>
+
+    <path d="M236 145V190" stroke="#38BDF8" stroke-width="4" marker-end="url(#arrow)" filter="url(#glow)"/>
+
+    <g transform="translate(0 202)">
+      <rect width="472" height="112" rx="22" fill="#0A1A28" stroke="#2C607D"/>
+      <rect x="24" y="25" width="86" height="62" rx="14" fill="#102B40" stroke="#38BDF8" stroke-width="2"/>
+      <text x="67" y="65" text-anchor="middle" fill="#7DD3FC" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="25" font-weight="700">SSH</text>
+      <text x="136" y="46" fill="#7896AA" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" letter-spacing="1.5">PERSISTENT TRANSPORT</text>
+      <text x="136" y="78" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="25" font-weight="650">Press Ctrl+V</text>
+    </g>
+
+    <path d="M236 323V368" stroke="#38BDF8" stroke-width="4" marker-end="url(#arrow)" filter="url(#glow)"/>
+
+    <g transform="translate(0 380)">
+      <rect width="472" height="136" rx="22" fill="#0A1A28" stroke="#2C607D"/>
+      <rect x="24" y="24" width="112" height="88" rx="14" fill="#06101A" stroke="#244A64"/>
+      <circle cx="39" cy="39" r="4" fill="#F87171"/><circle cx="53" cy="39" r="4" fill="#FBBF24"/><circle cx="67" cy="39" r="4" fill="#4ADE80"/>
+      <text x="42" y="78" fill="#4ADE80" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">›</text>
+      <text x="59" y="78" fill="#D7E3EC" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">[Image 1]</text>
+      <text x="160" y="57" fill="#7896AA" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" letter-spacing="1.5">REMOTE LINUX</text>
+      <text x="160" y="91" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="26" font-weight="650">Image in OpenCode</text>
+    </g>
+  </g>
+</svg>

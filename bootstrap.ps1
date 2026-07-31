@@ -1,7 +1,9 @@
 param(
     [string]$SshTarget,
     [string]$Version = "latest",
-    [switch]$SkipChecksum
+    [switch]$SkipChecksum,
+    [switch]$Uninstall,
+    [switch]$KeepConfig
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +23,73 @@ function ConvertTo-TomlBasicString([string]$Value) {
     $escaped = $Value.Replace("\", "\\").Replace('"', '\"')
     $escaped = $escaped.Replace("`r", "\r").Replace("`n", "\n").Replace("`t", "\t")
     return '"' + $escaped + '"'
+}
+
+function Get-ConfiguredSshTarget {
+    if (-not (Test-Path -LiteralPath $ConfigPath)) {
+        return $null
+    }
+
+    $config = Get-Content -Raw -LiteralPath $ConfigPath
+    $match = [regex]::Match($config, '(?m)^\s*ssh_target\s*=\s*"([^\"]+)"')
+    if (-not $match.Success) {
+        return $null
+    }
+
+    return $match.Groups[1].Value.Replace('\\', '\')
+}
+
+function Stop-InstalledClient {
+    Get-Process $ProgramName -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-CimInstance Win32_Process -Filter "Name='$ProgramName.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -eq $InstalledBinary } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Invoke-Uninstall {
+    $target = $SshTarget
+    if (-not $target) {
+        $target = Get-ConfiguredSshTarget
+    }
+
+    Write-Step "Stopping Windows client"
+    Stop-InstalledClient
+
+    $startup = [Environment]::GetFolderPath("Startup")
+    $shortcutPath = Join-Path $startup "OpenCode SSH Image Paste.lnk"
+    if (Test-Path -LiteralPath $shortcutPath) {
+        Remove-Item -Force -LiteralPath $shortcutPath
+    }
+
+    if ($target) {
+        if (Get-Command ssh.exe -ErrorAction SilentlyContinue) {
+            Write-Step "Removing Linux receiver from $target"
+            & ssh.exe -n -T -o BatchMode=yes -o ConnectTimeout=10 -- $target "rm -f ~/.local/bin/$ProgramName; rm -rf ~/.cache/$ProgramName"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Could not remove the remote receiver. Local uninstall will continue."
+            }
+        } else {
+            Write-Warning "Windows OpenSSH Client was not found. The remote receiver was not removed."
+        }
+    } else {
+        Write-Warning "No SSH target was provided or found in the configuration. The remote receiver was not removed."
+    }
+
+    Write-Step "Removing Windows client"
+    if (Test-Path -LiteralPath $InstallDir) {
+        Remove-Item -Recurse -Force -LiteralPath $InstallDir
+    }
+
+    if ($KeepConfig) {
+        if (Test-Path -LiteralPath $ConfigPath) {
+            Write-Host "Kept configuration: $ConfigPath"
+        }
+    } elseif (Test-Path -LiteralPath $ConfigDir) {
+        Remove-Item -Recurse -Force -LiteralPath $ConfigDir
+    }
+
+    Write-Host ""
+    Write-Host "Uninstall complete." -ForegroundColor Green
 }
 
 function Get-DownloadBase {
@@ -50,6 +119,15 @@ function Assert-Checksum([string]$File, [string]$ChecksumsFile, [string]$AssetNa
     }
 }
 
+if ($Uninstall) {
+    Invoke-Uninstall
+    return
+}
+
+if ($KeepConfig) {
+    throw "-KeepConfig can only be used together with -Uninstall."
+}
+
 if (-not (Get-Command ssh.exe -ErrorAction SilentlyContinue)) {
     throw "Windows OpenSSH Client was not found. Install it in Settings > Optional Features."
 }
@@ -67,7 +145,7 @@ $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("opencode-ssh-image-past
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 try {
-    Get-Process $ProgramName -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-InstalledClient
     Start-Sleep -Milliseconds 250
 
     Write-Step "Testing SSH connection to $SshTarget"

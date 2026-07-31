@@ -22,7 +22,7 @@
   <a href="#快速开始">快速开始</a> ·
   <a href="#特性">特性</a> ·
   <a href="#工作原理">工作原理</a> ·
-  <a href="#配置">配置</a>
+  <a href="#故障排查">故障排查</a>
 </p>
 
 <p align="center">
@@ -84,6 +84,17 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 更新时重新执行同一条快速安装命令即可。安装器会保留已有配置，并替换本地 Client
 和远端 Receiver。
 
+### 4. 卸载
+
+删除 Windows Client、登录启动项、配置、远端 Receiver 和远端图片缓存：
+
+```powershell
+.\bootstrap.ps1 -Uninstall
+```
+
+添加 `-KeepConfig` 可以保留本地配置。如果配置已经丢失，请使用
+`-SshTarget ubuntu-workbox` 显式指定远端。
+
 ## 特性
 
 - 同一个 `Ctrl+V`：文本原样放行，只有纯图片剪贴板内容才进入桥接。
@@ -118,6 +129,9 @@ ssh -o BatchMode=yes -n -T ubuntu-workbox "printf ready"
 
 命令必须输出 `ready` 并退出。否则请先用普通的 `ssh ubuntu-workbox` 连接一次，接受主机
 密钥，并配置 SSH key 或 `ssh-agent` 认证。
+
+下载失败、旧后台进程、任务栏窗口、图片粘贴失败、Receiver 检查和完整卸载说明参见
+[故障排查指南](docs/troubleshooting.zh-CN.md)。
 
 ## 手动构建与安装
 
@@ -227,6 +241,16 @@ request_timeout_seconds = 15
 - 同时包含文本与图片时按文本处理，避免改变原有粘贴语义。
 - Windows client 以无窗口后台进程运行，当前没有托盘菜单或图形化状态页；它仍会正常显示在 Windows 任务管理器中。
 - 提权 Windows Terminal 可能拒绝普通权限 client 的输入注入。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [故障排查](docs/troubleshooting.zh-CN.md) | SSH 卡住、安装失败、后台进程、粘贴失败和卸载 |
+| [设计说明](docs/design.md) | 架构、协议、状态机和威胁模型 |
+| [更新日志](CHANGELOG.md) | Release 历史和未发布变更 |
+| [配置示例](config.example.toml) | 支持的设置与默认值 |
+| [安全策略](SECURITY.md) | 安全问题报告方式 |
 
 ## 开发
 

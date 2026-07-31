@@ -22,7 +22,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#features">Features</a> ·
   <a href="#how-it-works">How it works</a> ·
-  <a href="#configuration">Configuration</a>
+  <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
 <p align="center">
@@ -89,6 +89,18 @@ connection, remote receiver version, and the background client process.
 To update, run the same quick-install command again. It keeps the existing
 configuration while replacing the local client and remote receiver.
 
+### 4. Uninstall
+
+Remove the Windows client, startup shortcut, configuration, remote receiver,
+and remote image cache:
+
+```powershell
+.\bootstrap.ps1 -Uninstall
+```
+
+Add `-KeepConfig` to preserve the local configuration. If the configuration is
+missing, provide the remote explicitly with `-SshTarget ubuntu-workbox`.
+
 ## Features
 
 - One `Ctrl+V` shortcut: text passes through unchanged, while image-only clipboard content uses the bridge.
@@ -125,6 +137,10 @@ ssh -o BatchMode=yes -n -T ubuntu-workbox "printf ready"
 The command must print `ready` and exit. If it does not, connect once with normal
 `ssh ubuntu-workbox` to accept the host key and configure key or `ssh-agent`
 authentication.
+
+See the [Troubleshooting Guide](docs/troubleshooting.md) for download failures,
+old background processes, taskbar windows, image paste failures, receiver checks,
+and complete uninstall instructions.
 
 ## Build and Install Manually
 
@@ -235,6 +251,16 @@ request_timeout_seconds = 15
 - Clipboard content containing both text and images is treated as text to preserve existing paste semantics.
 - The Windows client runs as a windowless background process and currently has no tray menu or graphical status page. It remains visible in Windows Task Manager.
 - An elevated Windows Terminal may reject input injection from a client running without elevation.
+
+## Documentation
+
+| Guide | What it covers |
+|---|---|
+| [Troubleshooting](docs/troubleshooting.md) | SSH hangs, installer failures, background processes, paste failures, and uninstall |
+| [Design](docs/design.md) | Architecture, protocol, state machine, and threat model |
+| [Changelog](CHANGELOG.md) | Release history and unreleased changes |
+| [Configuration example](config.example.toml) | Supported settings and defaults |
+| [Security](SECURITY.md) | Vulnerability reporting |
 
 ## Development
 
