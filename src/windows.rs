@@ -264,7 +264,10 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
         .map(|output| {
             String::from_utf8_lossy(&output.stdout)
                 .lines()
-                .filter(|line| line.to_ascii_lowercase().contains("opencode-ssh-image-paste.exe"))
+                .filter(|line| {
+                    line.to_ascii_lowercase()
+                        .contains("opencode-ssh-image-paste.exe")
+                })
                 .count()
         })
         .unwrap_or_default();
