@@ -1,16 +1,93 @@
-# OpenCode SSH Image Paste
+<p align="center">
+  <b>English</b> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-English | [简体中文](README.zh-CN.md)
+<p align="center">
+  <img src="docs/assets/hero.svg" width="100%" alt="OpenCode SSH Image Paste — Ctrl+V over SSH">
+</p>
 
-Paste screenshots from the Windows clipboard into an OpenCode TUI running on a remote Linux host over SSH. Text paste keeps its existing behavior; image paste uses the same `Ctrl+V` shortcut.
+<p align="center">
+  <a href="https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest"><img src="https://img.shields.io/github/v/release/Empty-Jing/opencode-ssh-image-paste?color=0EA5E9" alt="Latest release"></a>
+  <a href="https://github.com/Empty-Jing/opencode-ssh-image-paste/actions/workflows/ci.yml"><img src="https://github.com/Empty-Jing/opencode-ssh-image-paste/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F172A.svg" alt="MIT license"></a>
+</p>
 
-Supported workflow:
+<p align="center">
+  <b>Paste Windows screenshots into a remote OpenCode session with the same Ctrl+V shortcut.</b><br>
+  Text paste stays untouched. Image paste travels through your existing SSH connection.
+</p>
 
-```text
-Windows Terminal -> SSH -> Linux -> Herdr -> OpenCode TUI
-```
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#configuration">Configuration</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/demo.gif" width="720" alt="Paste a Windows screenshot into remote OpenCode over SSH">
+  <br>
+  <em>Capture → Ctrl+V → image appears in remote OpenCode.</em>
+</p>
 
 Regular SSH only transports terminal byte streams and cannot carry images from the Windows clipboard. This tool reads clipboard images locally on Windows, transfers them to a Linux receiver through a persistent OpenSSH subprocess, and pastes the resulting remote image path into OpenCode as regular text. OpenCode then recognizes the path as an image attachment.
+
+## Quick Start
+
+You need:
+
+- Windows 10/11 and Windows Terminal.
+- Windows OpenSSH Client.
+- Linux OpenSSH Server.
+- Non-interactive SSH key or `ssh-agent` authentication from Windows to Linux.
+- An OpenCode model that supports image input.
+
+### 1. Install
+
+Open PowerShell on Windows and run:
+
+```powershell
+iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1; .\bootstrap.ps1
+```
+
+Enter an SSH host or alias when prompted. The installer checks SSH, detects the
+remote Linux architecture, downloads checksum-verified release binaries, deploys
+the receiver, installs and starts the Windows client, enables startup at login,
+and runs diagnostics.
+
+For a non-interactive or auditable install, download the script first:
+
+```powershell
+iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1
+.\bootstrap.ps1 -SshTarget ubuntu-workbox
+```
+
+The SSH target must already accept host-key and key/`ssh-agent` authentication
+without an interactive password prompt. Rust is not required for this install.
+
+### 2. Paste
+
+1. Connect from Windows Terminal to Linux over SSH and start OpenCode directly or inside Herdr.
+2. Capture a screenshot with `Win+Shift+S`.
+3. Return to the original Windows Terminal window and press `Ctrl+V`.
+4. The OpenCode input should show `[Image 1]`.
+
+Text clipboard content continues to be pasted directly by Windows Terminal and does not use the image channel.
+
+### 3. Verify
+
+Check an existing installation at any time:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
+```
+
+`doctor` checks the configuration, OpenSSH client, Windows Terminal, SSH
+connection, remote receiver version, and the background client process.
+
+To update, run the same quick-install command again. It keeps the existing
+configuration while replacing the local client and remote receiver.
 
 ## Features
 
@@ -36,48 +113,23 @@ flowchart LR
     G --> H[OpenCode image attachment]
 ```
 
-## Requirements
+## Troubleshooting
 
-- Windows 10/11 and Windows Terminal.
-- Windows OpenSSH Client.
-- Linux OpenSSH Server.
-- Non-interactive SSH key or `ssh-agent` authentication from Windows to Linux.
-- An OpenCode model that supports image input.
-- A stable Rust/Cargo toolchain with Rust 2024 edition support only when building from source.
-
-## One-Command Install
-
-Open PowerShell on Windows and run:
+If installation stops at `Testing SSH connection`, first verify that the target
+can connect without prompts:
 
 ```powershell
-irm https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 | iex
+ssh -o BatchMode=yes -n -T ubuntu-workbox "printf ready"
 ```
 
-Enter an SSH host or alias when prompted. The installer checks SSH, detects the
-remote Linux architecture, downloads checksum-verified release binaries, deploys
-the receiver, installs and starts the Windows client, enables startup at login,
-and runs diagnostics.
-
-For a non-interactive or auditable install, download the script first:
-
-```powershell
-iwr https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 -OutFile bootstrap.ps1
-.\bootstrap.ps1 -SshTarget ubuntu-workbox
-```
-
-The SSH target must already accept host-key and key/`ssh-agent` authentication
-without an interactive password prompt. Rust is not required for this install.
-
-To check an existing installation:
-
-```powershell
-& "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
-```
-
-`doctor` checks the configuration, OpenSSH client, Windows Terminal, SSH
-connection, remote receiver version, and the background client process.
+The command must print `ready` and exit. If it does not, connect once with normal
+`ssh ubuntu-workbox` to accept the host key and configure key or `ssh-agent`
+authentication.
 
 ## Build and Install Manually
+
+Building from source requires a stable Rust/Cargo toolchain with Rust 2024
+edition support.
 
 ### Install the Linux Receiver
 
@@ -155,16 +207,6 @@ Startup: current user's Startup folder
 ```
 
 The installer does not overwrite an existing configuration.
-
-## Usage
-
-1. Connect from Windows Terminal to Linux over SSH and start OpenCode inside Herdr.
-2. Capture a screenshot with `Win+Shift+S`.
-3. Return to the original Windows Terminal window.
-4. Press the usual `Ctrl+V` shortcut.
-5. The OpenCode input should show `[Image 1]`.
-
-Text clipboard content continues to be pasted directly by Windows Terminal and does not use the image channel.
 
 ## Configuration
 

@@ -1,16 +1,88 @@
-# OpenCode SSH Image Paste
+<p align="center">
+  <a href="README.md">English</a> ·
+  <b>简体中文</b>
+</p>
 
-[English](README.md) | 简体中文
+<p align="center">
+  <img src="docs/assets/hero.svg" width="100%" alt="OpenCode SSH Image Paste — 通过 SSH 使用 Ctrl+V">
+</p>
 
-将 Windows 剪贴板中的截图粘贴到通过 SSH 运行在远端 Linux 主机上的 OpenCode TUI。文本粘贴保持原有行为，图片粘贴使用同一个 `Ctrl+V` 快捷键。
+<p align="center">
+  <a href="https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest"><img src="https://img.shields.io/github/v/release/Empty-Jing/opencode-ssh-image-paste?color=0EA5E9" alt="最新版本"></a>
+  <a href="https://github.com/Empty-Jing/opencode-ssh-image-paste/actions/workflows/ci.yml"><img src="https://github.com/Empty-Jing/opencode-ssh-image-paste/actions/workflows/ci.yml/badge.svg" alt="CI 状态"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0F172A.svg" alt="MIT 许可证"></a>
+</p>
 
-适用链路：
+<p align="center">
+  <b>使用同一个 Ctrl+V，将 Windows 截图粘贴到远端 OpenCode。</b><br>
+  文本照常粘贴，图片通过已有 SSH 配置传输。
+</p>
 
-```text
-Windows Terminal -> SSH -> Linux -> Herdr -> OpenCode TUI
-```
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#特性">特性</a> ·
+  <a href="#工作原理">工作原理</a> ·
+  <a href="#配置">配置</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/demo.gif" width="720" alt="通过 SSH 将 Windows 截图粘贴到远端 OpenCode">
+  <br>
+  <em>截图 → Ctrl+V → 图片出现在远端 OpenCode。</em>
+</p>
 
 普通 SSH 只传输终端字节流，不能携带 Windows 图片剪贴板。本工具在 Windows 本地读取图片，通过常驻 OpenSSH 子进程传到 Linux receiver，再把远端图片路径作为普通文本粘贴到 OpenCode。OpenCode 随后将该路径识别为图片附件。
+
+## 快速开始
+
+需要准备：
+
+- Windows 10/11 和 Windows Terminal。
+- Windows OpenSSH Client。
+- Linux OpenSSH Server。
+- Windows 到 Linux 已配置非交互 SSH key 或 `ssh-agent` 认证。
+- OpenCode 使用支持图片输入的模型。
+
+### 1. 安装
+
+在 Windows PowerShell 中运行：
+
+```powershell
+iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1; .\bootstrap.ps1
+```
+
+按提示输入 SSH 主机或别名。安装器会检测 SSH、识别远端 Linux 架构、下载并校验
+Release 二进制、部署 Receiver、安装并启动 Windows Client、启用登录自启动，最后运行诊断。
+一键安装不需要 Rust，但 SSH 必须已经配置好无需交互输入密码的密钥或 `ssh-agent` 认证。
+
+如果希望先检查脚本再运行：
+
+```powershell
+iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1
+.\bootstrap.ps1 -SshTarget ubuntu-workbox
+```
+
+### 2. 粘贴图片
+
+1. 从 Windows Terminal SSH 到 Linux，直接或通过 Herdr 启动 OpenCode。
+2. 使用 `Win+Shift+S` 截图。
+3. 回到原 Windows Terminal 窗口，按 `Ctrl+V`。
+4. OpenCode 输入框应出现 `[Image 1]`。
+
+文本剪贴板仍由 Windows Terminal 直接粘贴，不经过图片通道。
+
+### 3. 验证
+
+随时可以运行以下命令检查安装：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
+```
+
+`doctor` 会检查配置、OpenSSH、Windows Terminal、SSH 连接、远端 Receiver 版本和后台 Client 进程。
+
+更新时重新执行同一条快速安装命令即可。安装器会保留已有配置，并替换本地 Client
+和远端 Receiver。
 
 ## 特性
 
@@ -36,43 +108,20 @@ flowchart LR
     G --> H[OpenCode 图片附件]
 ```
 
-## 前置条件
+## 故障排查
 
-- Windows 10/11 和 Windows Terminal。
-- Windows OpenSSH Client。
-- Linux OpenSSH Server。
-- Windows 到 Linux 已配置非交互 SSH key 或 `ssh-agent` 认证。
-- OpenCode 使用支持图片输入的模型。
-- 只有从源码构建时才需要支持 Rust 2024 edition 的 Rust/Cargo stable 工具链。
-
-## 一键安装
-
-在 Windows PowerShell 中运行：
+如果安装停在 `Testing SSH connection`，先检查目标主机是否能在无提示的情况下连接：
 
 ```powershell
-irm https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 | iex
+ssh -o BatchMode=yes -n -T ubuntu-workbox "printf ready"
 ```
 
-按提示输入 SSH 主机或别名。安装器会检测 SSH、识别远端 Linux 架构、下载并校验
-Release 二进制、部署 Receiver、安装并启动 Windows Client、启用登录自启动，最后运行诊断。
-一键安装不需要 Rust，但 SSH 必须已经配置好无需交互输入密码的密钥或 `ssh-agent` 认证。
-
-如果希望先检查脚本再运行：
-
-```powershell
-iwr https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 -OutFile bootstrap.ps1
-.\bootstrap.ps1 -SshTarget ubuntu-workbox
-```
-
-检查现有安装：
-
-```powershell
-& "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
-```
-
-`doctor` 会检查配置、OpenSSH、Windows Terminal、SSH 连接、远端 Receiver 版本和后台 Client 进程。
+命令必须输出 `ready` 并退出。否则请先用普通的 `ssh ubuntu-workbox` 连接一次，接受主机
+密钥，并配置 SSH key 或 `ssh-agent` 认证。
 
 ## 手动构建与安装
+
+从源码构建需要支持 Rust 2024 edition 的 Rust/Cargo stable 工具链。
 
 ### 安装 Linux Receiver
 
@@ -150,16 +199,6 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
 ```
 
 安装脚本不会覆盖已有配置。
-
-## 使用
-
-1. 从 Windows Terminal SSH 到 Linux，在 Herdr 中启动 OpenCode。
-2. 使用 `Win+Shift+S` 截图。
-3. 回到原 Windows Terminal 窗口。
-4. 按原来的 `Ctrl+V`。
-5. OpenCode 输入框应出现 `[Image 1]`。
-
-文本剪贴板仍由 Windows Terminal 直接粘贴，不经过图片通道。
 
 ## 配置
 
