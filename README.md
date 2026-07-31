@@ -43,9 +43,43 @@ flowchart LR
 - Linux OpenSSH Server.
 - Non-interactive SSH key or `ssh-agent` authentication from Windows to Linux.
 - An OpenCode model that supports image input.
-- A stable Rust/Cargo toolchain with Rust 2024 edition support when building the receiver from source.
+- A stable Rust/Cargo toolchain with Rust 2024 edition support only when building from source.
 
-## Install the Linux Receiver
+## One-Command Install
+
+Open PowerShell on Windows and run:
+
+```powershell
+irm https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 | iex
+```
+
+Enter an SSH host or alias when prompted. The installer checks SSH, detects the
+remote Linux architecture, downloads checksum-verified release binaries, deploys
+the receiver, installs and starts the Windows client, enables startup at login,
+and runs diagnostics.
+
+For a non-interactive or auditable install, download the script first:
+
+```powershell
+iwr https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 -OutFile bootstrap.ps1
+.\bootstrap.ps1 -SshTarget ubuntu-workbox
+```
+
+The SSH target must already accept host-key and key/`ssh-agent` authentication
+without an interactive password prompt. Rust is not required for this install.
+
+To check an existing installation:
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
+```
+
+`doctor` checks the configuration, OpenSSH client, Windows Terminal, SSH
+connection, remote receiver startup, and the background client process.
+
+## Build and Install Manually
+
+### Install the Linux Receiver
 
 Run from the repository directory on Linux:
 
@@ -60,7 +94,7 @@ The receiver stores images in:
 ~/.cache/opencode-ssh-image-paste/
 ```
 
-## Build the Windows Client
+### Build the Windows Client
 
 Cross-compile on Linux:
 
@@ -81,7 +115,7 @@ Alternatively, build on Windows with Rust and Visual Studio Build Tools installe
 cargo build --release
 ```
 
-## Configure SSH
+### Configure SSH
 
 Create a host entry with non-interactive authentication in `%USERPROFILE%\.ssh\config`:
 
@@ -102,7 +136,7 @@ ssh ubuntu-workbox "test -x ~/.local/bin/opencode-ssh-image-paste && echo ready"
 
 The command must print `ready` without stopping for a password or host confirmation prompt.
 
-## Install the Windows Client
+### Install the Windows Client
 
 Place the EXE and `install-windows.ps1` in the same directory:
 

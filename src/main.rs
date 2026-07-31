@@ -1,5 +1,3 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
-
 mod protocol;
 mod receiver;
 
@@ -13,6 +11,11 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("receiver") => receiver::run(receiver_dir(args.collect())?),
+        Some("doctor") => run_doctor(args.next().map(PathBuf::from)),
+        Some("--version" | "-V") => {
+            println!("opencode-ssh-image-paste {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some("client") | None => run_client(args.next().map(PathBuf::from)),
         Some(command) => bail!("unknown command: {command}"),
     }
@@ -34,4 +37,14 @@ fn run_client(config: Option<PathBuf>) -> Result<()> {
 #[cfg(not(windows))]
 fn run_client(_config: Option<PathBuf>) -> Result<()> {
     bail!("client mode is only supported on Windows; use receiver mode on this platform")
+}
+
+#[cfg(windows)]
+fn run_doctor(config: Option<PathBuf>) -> Result<()> {
+    windows::doctor(config)
+}
+
+#[cfg(not(windows))]
+fn run_doctor(_config: Option<PathBuf>) -> Result<()> {
+    bail!("doctor mode is only supported on Windows")
 }

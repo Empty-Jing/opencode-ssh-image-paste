@@ -123,6 +123,179 @@ pub fn run(config_path: Option<PathBuf>) -> Result<()> {
     run_keyboard_hook()
 }
 
+pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
+    let config_path = config_path.unwrap_or_else(default_config_path);
+    let mut failures = 0_u32;
+
+    check(
+        "Configuration file",
+        config_path.is_file(),
+        &config_path.display().to_string(),
+        &mut failures,
+    );
+    let config = match load_config(&config_path) {
+        Ok(config) => {
+            check("Configuration syntax", true, "valid TOML", &mut failures);
+            config
+        }
+        Err(error) => {
+            check(
+                "Configuration syntax",
+                false,
+                &format!("{error:#}"),
+                &mut failures,
+            );
+            anyhow::bail!("doctor found {failures} problem(s)");
+        }
+    };
+    check(
+        "SSH target",
+        !config.ssh_target.trim().is_empty(),
+        if config.ssh_target.trim().is_empty() {
+            "ssh_target is empty"
+        } else {
+            &config.ssh_target
+        },
+        &mut failures,
+    );
+
+    let ssh_version = Command::new(&config.ssh_program)
+        .arg("-V")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match ssh_version {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(if output.stderr.is_empty() {
+                &output.stdout
+            } else {
+                &output.stderr
+            });
+            check("OpenSSH client", true, version.trim(), &mut failures);
+        }
+        Ok(output) => check(
+            "OpenSSH client",
+            false,
+            &format!("{} exited with {}", config.ssh_program, output.status),
+            &mut failures,
+        ),
+        Err(error) => check(
+            "OpenSSH client",
+            false,
+            &format!("could not run {}: {error}", config.ssh_program),
+            &mut failures,
+        ),
+    }
+
+    let terminal_available = Command::new("where.exe")
+        .arg("wt.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .is_ok_and(|status| status.success())
+        || std::env::var_os("LOCALAPPDATA").is_some_and(|base| {
+            PathBuf::from(base)
+                .join("Microsoft/WindowsApps/wt.exe")
+                .is_file()
+        });
+    check(
+        "Windows Terminal",
+        terminal_available,
+        if terminal_available {
+            "wt.exe found"
+        } else {
+            "wt.exe was not found"
+        },
+        &mut failures,
+    );
+
+    if !config.ssh_target.trim().is_empty() {
+        let mut remote = Command::new(&config.ssh_program);
+        remote
+            .args(&config.ssh_arguments)
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", config.request_timeout_seconds))
+            .arg(&config.ssh_target)
+            .arg(&config.remote_command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW);
+        match remote.output() {
+            Ok(output) if output.status.success() => check(
+                "Remote receiver",
+                true,
+                "SSH connection and receiver startup succeeded",
+                &mut failures,
+            ),
+            Ok(output) => {
+                let detail = String::from_utf8_lossy(&output.stderr);
+                check(
+                    "Remote receiver",
+                    false,
+                    if detail.trim().is_empty() {
+                        "SSH connection or receiver startup failed"
+                    } else {
+                        detail.trim()
+                    },
+                    &mut failures,
+                );
+            }
+            Err(error) => check(
+                "Remote receiver",
+                false,
+                &format!("could not start SSH: {error}"),
+                &mut failures,
+            ),
+        }
+    }
+
+    let process_count = Command::new("tasklist.exe")
+        .args([
+            "/FI",
+            "IMAGENAME eq opencode-ssh-image-paste.exe",
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.to_ascii_lowercase().contains("opencode-ssh-image-paste.exe"))
+                .count()
+        })
+        .unwrap_or_default();
+    check(
+        "Background client",
+        process_count >= 2,
+        if process_count >= 2 {
+            "client process is running"
+        } else {
+            "client process was not found"
+        },
+        &mut failures,
+    );
+
+    if failures == 0 {
+        println!("\nAll checks passed. Copy an image, focus Windows Terminal, and press Ctrl+V.");
+        Ok(())
+    } else {
+        anyhow::bail!("doctor found {failures} problem(s)")
+    }
+}
+
+fn check(name: &str, passed: bool, detail: &str, failures: &mut u32) {
+    if passed {
+        println!("[OK]   {name}: {detail}");
+    } else {
+        println!("[FAIL] {name}: {detail}");
+        *failures += 1;
+    }
+}
+
 fn default_config_path() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)

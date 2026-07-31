@@ -43,9 +43,38 @@ flowchart LR
 - Linux OpenSSH Server。
 - Windows 到 Linux 已配置非交互 SSH key 或 `ssh-agent` 认证。
 - OpenCode 使用支持图片输入的模型。
-- 从源码安装 receiver 时，需要支持 Rust 2024 edition 的 Rust/Cargo stable 工具链。
+- 只有从源码构建时才需要支持 Rust 2024 edition 的 Rust/Cargo stable 工具链。
 
-## 安装 Linux Receiver
+## 一键安装
+
+在 Windows PowerShell 中运行：
+
+```powershell
+irm https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 | iex
+```
+
+按提示输入 SSH 主机或别名。安装器会检测 SSH、识别远端 Linux 架构、下载并校验
+Release 二进制、部署 Receiver、安装并启动 Windows Client、启用登录自启动，最后运行诊断。
+一键安装不需要 Rust，但 SSH 必须已经配置好无需交互输入密码的密钥或 `ssh-agent` 认证。
+
+如果希望先检查脚本再运行：
+
+```powershell
+iwr https://raw.githubusercontent.com/Empty-Jing/opencode-ssh-image-paste/main/bootstrap.ps1 -OutFile bootstrap.ps1
+.\bootstrap.ps1 -SshTarget ubuntu-workbox
+```
+
+检查现有安装：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
+```
+
+`doctor` 会检查配置、OpenSSH、Windows Terminal、SSH 连接、远端 Receiver 和后台 Client 进程。
+
+## 手动构建与安装
+
+### 安装 Linux Receiver
 
 在 Linux 仓库目录执行：
 
@@ -60,7 +89,7 @@ Receiver 默认将图片保存到：
 ~/.cache/opencode-ssh-image-paste/
 ```
 
-## 构建 Windows Client
+### 构建 Windows Client
 
 在 Linux 上交叉构建：
 
@@ -81,7 +110,7 @@ target/x86_64-pc-windows-msvc/release/opencode-ssh-image-paste.exe
 cargo build --release
 ```
 
-## 配置 SSH
+### 配置 SSH
 
 在 `%USERPROFILE%\.ssh\config` 中准备可免交互认证的 Host：
 
@@ -102,7 +131,7 @@ ssh ubuntu-workbox "test -x ~/.local/bin/opencode-ssh-image-paste && echo ready"
 
 命令必须输出 `ready`，不能停在密码或主机确认提示。
 
-## 安装 Windows Client
+### 安装 Windows Client
 
 把 EXE 和 `install-windows.ps1` 放在同一目录：
 
