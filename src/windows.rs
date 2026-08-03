@@ -1218,7 +1218,6 @@ struct Transport {
     ssh_target: String,
     remote_command: String,
     remote_probe_command: String,
-    request_timeout_seconds: u64,
     connection: Option<Connection>,
 }
 
@@ -1230,7 +1229,6 @@ impl Transport {
             ssh_target: config.ssh_target.clone(),
             remote_command: config.remote_command.clone(),
             remote_probe_command: config.remote_probe_command.clone(),
-            request_timeout_seconds: config.request_timeout_seconds,
             connection: None,
         }
     }
@@ -1243,6 +1241,9 @@ impl Transport {
         timing: &mut PasteTiming,
     ) -> Result<String> {
         let request = Request { id, png };
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .context("request timeout is too large")?;
         timing.connection = if self.connection.is_some() {
             "reused"
         } else {
@@ -1252,14 +1253,15 @@ impl Transport {
             if self.connection.is_none() {
                 timing.ssh_attempts += 1;
                 let stage = Instant::now();
-                let connection = self.connect();
+                let connection = self.connect(deadline);
                 add_duration(&mut timing.ssh_spawn, stage.elapsed());
                 match connection {
                     Ok(connection) => self.connection = Some(connection),
                     Err(error) if attempt == 0 => {
                         eprintln!("SSH clipboard connection failed, retrying: {error:#}");
                         let stage = Instant::now();
-                        thread::sleep(Duration::from_millis(250));
+                        let remaining = remaining_request_time(deadline)?;
+                        thread::sleep(Duration::from_millis(250).min(remaining));
                         add_duration(&mut timing.retry_sleep, stage.elapsed());
                         continue;
                     }
@@ -1268,7 +1270,12 @@ impl Transport {
             }
             timing.upload_attempts += 1;
             let stage = Instant::now();
-            let upload = self.connection.as_mut().unwrap().upload(&request, timeout);
+            let remaining = remaining_request_time(deadline)?;
+            let upload = self
+                .connection
+                .as_mut()
+                .unwrap()
+                .upload(&request, remaining);
             add_duration(&mut timing.upload_receiver, stage.elapsed());
             match upload {
                 Ok(path) => return Ok(path),
@@ -1283,12 +1290,13 @@ impl Transport {
         unreachable!()
     }
 
-    fn connect(&self) -> Result<Connection> {
+    fn connect(&self, deadline: Instant) -> Result<Connection> {
+        let probe_timeout = remaining_request_time(deadline)?;
         let mut probe = Command::new(&self.ssh_program);
         configure_ssh_options(
             &mut probe,
             &self.ssh_arguments,
-            self.request_timeout_seconds,
+            probe_timeout.as_secs().max(1),
             false,
         );
         probe
@@ -1299,10 +1307,7 @@ impl Transport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW);
-        match command_output_with_timeout(
-            &mut probe,
-            Duration::from_secs(self.request_timeout_seconds),
-        )? {
+        match command_output_with_timeout(&mut probe, probe_timeout)? {
             TimedCommandOutput::Completed(output)
                 if output.status.success()
                     && receiver_capabilities_are_compatible(&output.stdout) => {}
@@ -1314,11 +1319,12 @@ impl Transport {
             }
         }
 
+        let connect_timeout = remaining_request_time(deadline)?;
         let mut command = Command::new(&self.ssh_program);
         configure_ssh_options(
             &mut command,
             &self.ssh_arguments,
-            self.request_timeout_seconds,
+            connect_timeout.as_secs().max(1),
             true,
         );
         let mut child = command
@@ -1341,6 +1347,12 @@ impl Transport {
             output,
         })
     }
+}
+
+fn remaining_request_time(deadline: Instant) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    anyhow::ensure!(!remaining.is_zero(), "SSH receiver request timed out");
+    Ok(remaining)
 }
 
 fn add_duration(total: &mut Option<Duration>, value: Duration) {
@@ -1561,6 +1573,12 @@ mod tests {
                 (VK_CONTROL, KEYEVENTF_KEYUP),
             ]
         );
+    }
+
+    #[test]
+    fn request_deadline_rejects_expired_budget() {
+        assert!(remaining_request_time(Instant::now() - Duration::from_millis(1)).is_err());
+        assert!(remaining_request_time(Instant::now() + Duration::from_secs(1)).is_ok());
     }
 
     #[test]

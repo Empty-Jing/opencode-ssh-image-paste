@@ -164,6 +164,7 @@ fn store(directory: &Path, request: Request, next_slot: &mut usize) -> Result<Pa
         "payload is not a PNG image"
     );
     let slot = *next_slot;
+    let next_slot_after_store = following_slot(directory, slot)?;
     let path = image_slot_path(directory, slot);
     for attempt in 0..100_u32 {
         let temporary = directory.join(format!(
@@ -189,7 +190,7 @@ fn store(directory: &Path, request: Request, next_slot: &mut usize) -> Result<Pa
                     format!("replace {} with {}", path.display(), temporary.display())
                 })?;
                 temporary_guard.persist();
-                *next_slot = (slot + 1) % protocol::IMAGE_SLOT_COUNT;
+                *next_slot = next_slot_after_store;
                 return Ok(path);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -206,12 +207,16 @@ fn image_slot_path(directory: &Path, slot: usize) -> PathBuf {
 }
 
 fn initial_slot(directory: &Path) -> Result<usize> {
+    let mut first_missing = None;
     let mut oldest: Option<(usize, SystemTime)> = None;
     for slot in 0..protocol::IMAGE_SLOT_COUNT {
         let path = image_slot_path(directory, slot);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(slot),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                first_missing.get_or_insert(slot);
+                continue;
+            }
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("inspect managed image slot {}", path.display()));
@@ -229,7 +234,46 @@ fn initial_slot(directory: &Path) -> Result<usize> {
             oldest = Some((slot, modified));
         }
     }
-    Ok(oldest.map(|(slot, _)| slot).unwrap_or(0))
+    Ok(first_missing
+        .or_else(|| oldest.map(|(slot, _)| slot))
+        .unwrap_or(0))
+}
+
+fn following_slot(directory: &Path, current_slot: usize) -> Result<usize> {
+    let mut oldest = None;
+    for offset in 1..protocol::IMAGE_SLOT_COUNT {
+        let slot = (current_slot + offset) % protocol::IMAGE_SLOT_COUNT;
+        match fs::symlink_metadata(image_slot_path(directory, slot)) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_file(),
+                    "managed image slot {} is not a regular file; remove it before starting the receiver",
+                    image_slot_path(directory, slot).display()
+                );
+                let modified = metadata.modified().with_context(|| {
+                    format!(
+                        "read modification time for {}",
+                        image_slot_path(directory, slot).display()
+                    )
+                })?;
+                if oldest.is_none_or(|(_, oldest_modified)| modified < oldest_modified) {
+                    oldest = Some((slot, modified));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(slot),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "inspect managed image slot {}",
+                        image_slot_path(directory, slot).display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(oldest
+        .map(|(slot, _)| slot)
+        .unwrap_or((current_slot + 1) % protocol::IMAGE_SLOT_COUNT))
 }
 
 fn cleanup(directory: &Path) {
@@ -443,6 +487,58 @@ mod tests {
         }
 
         assert_eq!(initial_slot(&directory).unwrap(), 3);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn fills_all_slot_holes_before_overwriting_existing_images() {
+        let directory = temp_directory("slot-holes");
+        let _ = fs::remove_dir_all(&directory);
+        ensure_directory(&directory).unwrap();
+        for slot in 1..protocol::IMAGE_SLOT_COUNT {
+            if slot == 2 {
+                continue;
+            }
+            let mut png = PNG_SIGNATURE.to_vec();
+            png.extend_from_slice(&(slot as u64).to_le_bytes());
+            fs::write(image_slot_path(&directory, slot), png).unwrap();
+            if slot == 1 {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let slot_one_before = fs::read(image_slot_path(&directory, 1)).unwrap();
+        let mut next_slot = initial_slot(&directory).unwrap();
+        assert_eq!(next_slot, 0);
+
+        for id in 0..2 {
+            let mut png = PNG_SIGNATURE.to_vec();
+            png.extend_from_slice(&(100_u64 + id).to_le_bytes());
+            store(&directory, Request { id, png }, &mut next_slot).unwrap();
+        }
+
+        assert!(image_slot_path(&directory, 0).is_file());
+        assert!(image_slot_path(&directory, 2).is_file());
+        assert_eq!(
+            fs::read(image_slot_path(&directory, 1)).unwrap(),
+            slot_one_before
+        );
+        assert_eq!(next_slot, 1);
+
+        let mut replacement = PNG_SIGNATURE.to_vec();
+        replacement.extend_from_slice(&102_u64.to_le_bytes());
+        store(
+            &directory,
+            Request {
+                id: 2,
+                png: replacement,
+            },
+            &mut next_slot,
+        )
+        .unwrap();
+        assert_ne!(
+            fs::read(image_slot_path(&directory, 1)).unwrap(),
+            slot_one_before
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -85,16 +85,45 @@ function Get-ConfiguredSshTarget {
     return $match.Groups[1].Value.Replace('\\', '\')
 }
 
-function Stop-InstalledClient {
-    Get-CimInstance Win32_Process -Filter "Name='$ProgramName.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $InstalledBinary } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+function Get-InstalledClientProcesses {
+    try {
+        $namedProcesses = @(Get-CimInstance Win32_Process -Filter "Name='$ProgramName.exe'" -ErrorAction Stop)
+    } catch {
+        throw "Could not inspect installed Windows client processes: $_"
+    }
+    if ($namedProcesses | Where-Object { -not $_.ExecutablePath }) {
+        throw "Could not determine the executable path of a running $ProgramName process."
+    }
+    return @($namedProcesses | Where-Object { $_.ExecutablePath -ieq $InstalledBinary })
+}
+
+function Stop-InstalledClient([int]$TimeoutMilliseconds = 5000) {
+    $processes = @(Get-InstalledClientProcesses)
+    foreach ($process in $processes) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    if ($processes.Count -eq 0) {
+        return $true
+    }
+    return Wait-InstalledClientStopped -TimeoutMilliseconds $TimeoutMilliseconds
+}
+
+function Wait-InstalledClientStopped(
+    [int]$TimeoutMilliseconds = 5000,
+    [scriptblock]$Probe = { Test-InstalledClientRunning }
+) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (-not (& $Probe)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    } while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    return -not (& $Probe)
 }
 
 function Test-InstalledClientRunning {
-    return [bool](Get-CimInstance Win32_Process -Filter "Name='$ProgramName.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $InstalledBinary } |
-        Select-Object -First 1)
+    return @(Get-InstalledClientProcesses).Count -gt 0
 }
 
 function Wait-InstalledClientRunning(
@@ -120,6 +149,18 @@ function Start-InstalledClient {
     # Existing installations before the hidden launcher was introduced still
     # need to be restartable if an upgrade rolls back before creating it.
     Start-Process -FilePath $InstalledBinary -ArgumentList @("client", "`"$ConfigPath`"") -WindowStyle Hidden
+}
+
+function Start-NormalInstalledClient([string]$ShortcutPath) {
+    if (-not (Test-IsAdministrator)) {
+        Start-InstalledClient
+        return
+    }
+
+    # Explorer brokers the shortcut through the existing normal-integrity shell
+    # instead of inheriting this administrator installer's token.
+    $explorer = Join-Path $env:SystemRoot "explorer.exe"
+    Start-Process -FilePath $explorer -ArgumentList @("`"$ShortcutPath`"")
 }
 
 function Get-ClientLauncherText {
@@ -809,19 +850,25 @@ function Invoke-Uninstall {
     $clientWasRunning = Test-InstalledClientRunning
     $clientStopped = $false
     $startupTaskRemoved = $false
+    $startup = [Environment]::GetFolderPath("Startup")
+    $shortcutPath = Join-Path $startup "OpenCode SSH Image Paste.lnk"
+    $shortcutExisted = Test-Path -LiteralPath $shortcutPath
+    $shortcutBytes = if ($shortcutExisted) { [IO.File]::ReadAllBytes($shortcutPath) } else { $null }
+    $shortcutRemoved = $false
 
     try {
         Write-Step "Stopping Windows client"
-        Stop-InstalledClient
+        if (-not (Stop-InstalledClient)) {
+            throw "Could not stop the installed Windows client. Close it in Task Manager, then rerun uninstall."
+        }
         $clientStopped = $true
 
         Write-Step "Removing Windows Terminal paste action"
         Uninstall-WindowsTerminalAction -PlannedUpdates $terminalUpdates
 
-        $startup = [Environment]::GetFolderPath("Startup")
-        $shortcutPath = Join-Path $startup "OpenCode SSH Image Paste.lnk"
         if (Test-Path -LiteralPath $shortcutPath) {
             Remove-Item -Force -LiteralPath $shortcutPath
+            $shortcutRemoved = $true
         }
         Remove-ElevatedStartupTask
         $startupTaskRemoved = $startupTaskExists
@@ -856,6 +903,17 @@ function Invoke-Uninstall {
         $failure = $_
         $terminalRollbackComplete = $true
         $startupRollbackComplete = $true
+        if ($shortcutRemoved) {
+            try {
+                if (Test-Path -LiteralPath $shortcutPath) {
+                    throw "Startup shortcut was recreated concurrently: $shortcutPath"
+                }
+                [IO.File]::WriteAllBytes($shortcutPath, $shortcutBytes)
+            } catch {
+                $startupRollbackComplete = $false
+                Write-Warning "Uninstall failed and the Startup shortcut could not be restored: $_"
+            }
+        }
         if ($startupTaskRemoved) {
             try {
                 Register-ScheduledTask `
@@ -885,6 +943,8 @@ function Invoke-Uninstall {
             try {
                 if ($startupTaskExists) {
                     Start-ElevatedStartupTask
+                } elseif ($shortcutExisted) {
+                    Start-NormalInstalledClient $shortcutPath
                 } else {
                     Start-InstalledClient
                 }
@@ -1218,8 +1278,9 @@ try {
     # preflight has succeeded. This is the only window in which the old client
     # is stopped.
     $commitStarted = $true
-    Stop-InstalledClient
-    Start-Sleep -Milliseconds 250
+    if (-not (Stop-InstalledClient)) {
+        throw "Could not stop the previous Windows client. Close it in Task Manager, then rerun bootstrap.ps1."
+    }
 
     Write-Step "Configuring 10 atomic Windows Terminal paste actions"
     foreach ($update in $terminalUpdates) {
@@ -1298,7 +1359,7 @@ try {
     if ($UseElevatedStartup) {
         Start-ElevatedStartupTask
     } else {
-        Start-InstalledClient
+        Start-NormalInstalledClient $shortcutPath
     }
     if (-not (Wait-InstalledClientRunning)) {
         throw "The installed Windows client exited before diagnostics. Check antivirus or application-control events, then rerun bootstrap.ps1."
@@ -1319,7 +1380,18 @@ try {
     $failure = $_
     if ($commitStarted) {
         $rollbackComplete = $true
-        Stop-InstalledClient
+        try {
+            $rollbackClientStopped = Stop-InstalledClient
+        } catch {
+            $retainLocalRollback = $true
+            Write-Warning "Could not inspect or stop the newly started Windows client; installation rollback was not attempted: $_"
+            throw $failure
+        }
+        if (-not $rollbackClientStopped) {
+            $retainLocalRollback = $true
+            Write-Warning "Could not stop the newly started Windows client; installation rollback was not attempted."
+            throw $failure
+        }
 
         if ($shortcutCommitted) {
             try {
@@ -1483,6 +1555,8 @@ try {
             try {
                 if ($startupTaskExisted) {
                     Start-ElevatedStartupTask
+                } elseif ($shortcutExisted) {
+                    Start-NormalInstalledClient $shortcutPath
                 } else {
                     Start-InstalledClient
                 }

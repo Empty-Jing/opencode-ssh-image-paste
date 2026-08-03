@@ -58,6 +58,24 @@ try {
     Assert-True ($startupShortcut.TargetPath -ieq $WindowsScriptHost) "Startup shortcut directly launches a console executable."
     Assert-True ($startupShortcut.Arguments -match [regex]::Escape($LauncherPath)) "Startup shortcut does not invoke the hidden client launcher."
 
+    # An administrator installer must broker normal startup through Explorer;
+    # directly starting wscript would leak the elevated token into the client.
+    $originalTestIsAdministrator = ${function:Test-IsAdministrator}
+    $script:normalStart = $null
+    function Test-IsAdministrator { return $true }
+    function Start-Process {
+        param($FilePath, $ArgumentList)
+        $script:normalStart = [pscustomobject]@{ FilePath = $FilePath; ArgumentList = $ArgumentList }
+    }
+    try {
+        Start-NormalInstalledClient $startupFixture
+    } finally {
+        Remove-Item -Force "Function:\Start-Process"
+        Set-Item "Function:\Test-IsAdministrator" $originalTestIsAdministrator
+    }
+    Assert-True ($script:normalStart.FilePath -ieq (Join-Path $env:SystemRoot "explorer.exe")) "Elevated installer did not broker normal startup through Explorer."
+    Assert-True (($script:normalStart.ArgumentList -join " ") -match [regex]::Escape($startupFixture)) "Explorer startup did not target the installed Startup shortcut."
+
     # Elevated startup must remain per-user and launch the same hidden VBS
     # entrypoint at the highest run level. Mock ScheduledTasks cmdlets so the
     # fixture never creates or modifies a machine task.
@@ -117,6 +135,14 @@ try {
     }
     Assert-True $startedAfterDelay "Client startup polling rejected a delayed successful launch."
     Assert-True ($script:startupProbeCalls -eq 7) "Client startup polling did not stop after detecting the process."
+
+    $script:shutdownProbeCalls = 0
+    $stoppedAfterDelay = Wait-InstalledClientStopped -TimeoutMilliseconds 1000 -Probe {
+        $script:shutdownProbeCalls++
+        return $script:shutdownProbeCalls -lt 7
+    }
+    Assert-True $stoppedAfterDelay "Client shutdown polling rejected a delayed successful exit."
+    Assert-True ($script:shutdownProbeCalls -eq 7) "Client shutdown polling did not stop after detecting process exit."
 
     # Regression: deleting adjacent objects from immutable ranges must not use
     # offsets made stale by an earlier deletion.
@@ -335,7 +361,7 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     $script:uninstallStopCalls = 0
     $script:uninstallStartCalls = 0
     function Test-InstalledClientRunning { return $true }
-    function Stop-InstalledClient { $script:uninstallStopCalls++ }
+    function Stop-InstalledClient { $script:uninstallStopCalls++; return $true }
     function Start-InstalledClient { $script:uninstallStartCalls++ }
 
     [IO.File]::WriteAllText($terminalSettings, "{ invalid", (New-Object Text.UTF8Encoding($false)))

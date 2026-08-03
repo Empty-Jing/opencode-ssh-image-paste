@@ -8,6 +8,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Start the default normal-integrity client through Explorer when installation
+  runs elevated, wait for the previous client to exit before replacement, share
+  one deadline across receiver probing and upload retries, and fill receiver slot
+  holes before overwriting existing images.
 - Avoid a trailing comma after generated actions when the existing Windows
   Terminal root `actions` array is empty, and repair affected v0.1.8 output on
   the next installer run.
