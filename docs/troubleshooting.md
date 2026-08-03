@@ -51,8 +51,22 @@ do not call the anonymous GitHub Releases API. If an older script reports an API
 rate limit, download `bootstrap.ps1` again using the command above.
 
 For other download errors, verify that PowerShell can reach both `github.com`
-and `objects.githubusercontent.com`, then retry without a proxy that rewrites or
+and `release-assets.githubusercontent.com`, then retry without a proxy that rewrites or
 blocks GitHub release downloads.
+
+## Installation requires an administrator PowerShell
+
+This is the default and is intentional. The installer creates a per-user login
+task with `RunLevel=Highest` so the keyboard hook and input injection can work in
+an administrator Windows Terminal. Installation and updates require one UAC
+authorization, while login startup does not prompt again.
+
+If Windows Terminal always runs without administrator privileges, explicitly
+install the normal-integrity mode instead:
+
+```powershell
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -NonElevatedStartup
+```
 
 ## A client window remains visible in the taskbar
 
@@ -73,7 +87,8 @@ Check these conditions:
 - The focused application is Windows Terminal.
 - The same Windows Terminal window and pane remained focused during upload.
 - The background client is running and `doctor` reports it as healthy.
-- Windows Terminal and the client run at the same privilege level. A normal client cannot inject input into an elevated terminal.
+- Windows Terminal and the client run at the same privilege level. The default
+  installation is elevated; `-NonElevatedStartup` is only for a normal Terminal.
 - The selected OpenCode model supports image input.
 
 Text-only clipboard content intentionally remains handled by Windows Terminal.

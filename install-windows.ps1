@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$WindowsBinaryPath,
     [Parameter(Mandatory = $true)]
-    [string]$LinuxBinaryPath
+    [string]$LinuxBinaryPath,
+    [switch]$NonElevatedStartup
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,4 +17,5 @@ if (-not (Test-Path -LiteralPath $bootstrap)) {
 & $bootstrap `
     -SshTarget $SshTarget `
     -WindowsBinaryPath $WindowsBinaryPath `
-    -LinuxBinaryPath $LinuxBinaryPath
+    -LinuxBinaryPath $LinuxBinaryPath `
+    -NonElevatedStartup:$NonElevatedStartup

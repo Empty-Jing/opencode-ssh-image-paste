@@ -45,15 +45,20 @@ You need:
 
 ### 1. Install
 
-Open PowerShell on Windows and run:
+Open PowerShell **as administrator** on Windows and run:
 
 ```powershell
-iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1; .\bootstrap.ps1
+iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1 -ErrorAction Stop
+.\bootstrap.ps1
 ```
 
-Enter an SSH host or alias when prompted. The installer checks SSH, detects the
+Enter an SSH host or alias when prompted. By default, the installer creates a
+per-user login task at the highest run level because the client must match an
+administrator Windows Terminal's integrity level. The one-time installation or
+update therefore requires elevation; subsequent logins do not display a UAC
+prompt. The installer then checks SSH, detects the
 remote Linux architecture, downloads checksum-verified release binaries, deploys
-the receiver, installs and starts the Windows client, enables startup at login,
+the receiver, installs and starts the Windows client, enables elevated startup at login,
 and runs diagnostics.
 
 Published Linux receivers for x86_64 and aarch64 are statically linked with
@@ -68,6 +73,18 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 
 The SSH target must already accept host-key and key/`ssh-agent` authentication
 without an interactive password prompt. Rust is not required for this install.
+
+For a non-elevated Windows Terminal, explicitly opt out of the default elevated
+task. Run this command from an administrator PowerShell when switching an
+existing elevated installation so the old task can be removed:
+
+```powershell
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -NonElevatedStartup
+```
+
+This creates a normal per-user Startup shortcut instead. A normal client cannot
+inject input into an elevated Terminal; keep the default mode unless Terminal is
+always run without administrator privileges.
 
 ### 2. Paste
 
@@ -90,12 +107,13 @@ Check an existing installation at any time:
 private paste action, SSH connection, remote receiver compatibility, and the
 background client process.
 
-To update, run the same quick-install command again. It keeps the existing
+To update, run the same quick-install command again from an administrator
+PowerShell. It keeps the existing
 configuration while replacing the local client and remote receiver.
 
 ### 4. Uninstall
 
-Remove the Windows client, startup shortcut, configuration, remote receiver,
+Remove the Windows client, startup shortcut or elevated task, configuration, remote receiver,
 and remote image cache:
 
 ```powershell
@@ -103,7 +121,9 @@ and remote image cache:
 ```
 
 Add `-KeepConfig` to preserve the local configuration. If the configuration is
-missing, provide the remote explicitly with `-SshTarget ubuntu-workbox`.
+missing, provide the remote explicitly with `-SshTarget ubuntu-workbox`. The
+default elevated task also requires uninstall to run from an administrator
+PowerShell.
 
 ## Features
 
@@ -211,7 +231,9 @@ The command must print `ready` without stopping for a password or host confirmat
 ### Install the Windows Client
 
 Keep `bootstrap.ps1` and `install-windows.ps1` together, then provide both a
-Windows client binary and a Linux receiver binary built from the same commit:
+Windows client binary and a Linux receiver binary built from the same commit.
+Run the command from an administrator PowerShell because local installation uses
+the same default elevated login task as the Release installer:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `

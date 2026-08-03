@@ -4,6 +4,7 @@ param(
     [string]$WindowsBinaryPath,
     [string]$LinuxBinaryPath,
     [switch]$SkipChecksum,
+    [switch]$NonElevatedStartup,
     [switch]$Uninstall,
     [switch]$KeepConfig,
     [Parameter(DontShow = $true)]
@@ -18,6 +19,14 @@ $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\OpenCodeSSHImagePaste"
 $ConfigDir = Join-Path $env:APPDATA "OpenCodeSSHImagePaste"
 $ConfigPath = Join-Path $ConfigDir "config.toml"
 $InstalledBinary = Join-Path $InstallDir "$ProgramName.exe"
+$LauncherPath = Join-Path $InstallDir "start-client.vbs"
+$WindowsScriptHost = Join-Path $env:SystemRoot "System32\wscript.exe"
+$StartupTaskName = if ($InternalTestMode) {
+    "OpenCode SSH Image Paste (Elevated Bootstrap Test)"
+} else {
+    "OpenCode SSH Image Paste (Elevated)"
+}
+$UseElevatedStartup = -not $NonElevatedStartup
 $TerminalActionId = "User.OpenCodeSSHImagePaste.AtomicPaste"
 $ImageSlotCount = 50
 $TerminalActionBegin = "// OpenCodeSSHImagePaste Action BEGIN"
@@ -84,8 +93,95 @@ function Test-InstalledClientRunning {
         Select-Object -First 1)
 }
 
+function Wait-InstalledClientRunning(
+    [int]$TimeoutMilliseconds = 5000,
+    [scriptblock]$Probe = { Test-InstalledClientRunning }
+) {
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (& $Probe) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    } while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    return [bool](& $Probe)
+}
+
 function Start-InstalledClient {
+    if (Test-Path -LiteralPath $LauncherPath) {
+        Start-Process -FilePath $WindowsScriptHost -ArgumentList @("//B", "//NoLogo", "`"$LauncherPath`"")
+        return
+    }
+
+    # Existing installations before the hidden launcher was introduced still
+    # need to be restartable if an upgrade rolls back before creating it.
     Start-Process -FilePath $InstalledBinary -ArgumentList @("client", "`"$ConfigPath`"") -WindowStyle Hidden
+}
+
+function Get-ClientLauncherText {
+    $command = '"' + $InstalledBinary + '" client "' + $ConfigPath + '"'
+    $commandLiteral = '"' + $command.Replace('"', '""') + '"'
+    return @"
+Option Explicit
+Dim shell
+Set shell = CreateObject("WScript.Shell")
+shell.Run $commandLiteral, 0, False
+"@
+}
+
+function Set-StartupShortcut([string]$Path) {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($Path)
+    $shortcut.TargetPath = $WindowsScriptHost
+    $shortcut.Arguments = "//B //NoLogo `"$LauncherPath`""
+    $shortcut.WorkingDirectory = $InstallDir
+    $shortcut.WindowStyle = 7
+    $shortcut.Save()
+}
+
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-StartupTask {
+    return Get-ScheduledTask -TaskName $StartupTaskName -ErrorAction SilentlyContinue
+}
+
+function Register-ElevatedStartupTask {
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $action = New-ScheduledTaskAction `
+        -Execute $WindowsScriptHost `
+        -Argument "//B //NoLogo `"$LauncherPath`"" `
+        -WorkingDirectory $InstallDir
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId $currentUser `
+        -LogonType Interactive `
+        -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask `
+        -TaskName $StartupTaskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Description "Run OpenCode SSH Image Paste for elevated Windows Terminal sessions." `
+        -Force | Out-Null
+}
+
+function Remove-ElevatedStartupTask {
+    if (Get-StartupTask) {
+        Unregister-ScheduledTask -TaskName $StartupTaskName -Confirm:$false
+    }
+}
+
+function Start-ElevatedStartupTask {
+    Start-ScheduledTask -TaskName $StartupTaskName
 }
 
 function Test-CanRestartPreviousClient(
@@ -652,8 +748,18 @@ function Invoke-Uninstall {
     # malformed settings file must leave the currently installed client alone.
     Write-Step "Checking Windows Terminal paste action"
     $terminalUpdates = @(Get-WindowsTerminalUninstallUpdates)
+    $startupTaskExists = [bool](Get-StartupTask)
+    $startupTaskXml = if ($startupTaskExists) {
+        Export-ScheduledTask -TaskName $StartupTaskName
+    } else {
+        $null
+    }
+    if ($startupTaskExists -and -not (Test-IsAdministrator)) {
+        throw "Uninstall must run in an administrator PowerShell because the elevated startup task exists."
+    }
     $clientWasRunning = Test-InstalledClientRunning
     $clientStopped = $false
+    $startupTaskRemoved = $false
 
     try {
         Write-Step "Stopping Windows client"
@@ -668,6 +774,8 @@ function Invoke-Uninstall {
         if (Test-Path -LiteralPath $shortcutPath) {
             Remove-Item -Force -LiteralPath $shortcutPath
         }
+        Remove-ElevatedStartupTask
+        $startupTaskRemoved = $startupTaskExists
 
         if ($target) {
             if (Get-Command ssh.exe -ErrorAction SilentlyContinue) {
@@ -698,6 +806,18 @@ function Invoke-Uninstall {
     } catch {
         $failure = $_
         $terminalRollbackComplete = $true
+        $startupRollbackComplete = $true
+        if ($startupTaskRemoved) {
+            try {
+                Register-ScheduledTask `
+                    -TaskName $StartupTaskName `
+                    -Xml $startupTaskXml `
+                    -Force | Out-Null
+            } catch {
+                $startupRollbackComplete = $false
+                Write-Warning "Uninstall failed and the elevated startup task could not be restored: $_"
+            }
+        }
         foreach ($update in $terminalUpdates) {
             try {
                 if (-not (Test-Path -LiteralPath $update.Path) -or
@@ -710,11 +830,15 @@ function Invoke-Uninstall {
                 break
             }
         }
-        if ($clientStopped -and $clientWasRunning -and $terminalRollbackComplete -and
+        if ($clientStopped -and $clientWasRunning -and $terminalRollbackComplete -and $startupRollbackComplete -and
             (Test-Path -LiteralPath $InstalledBinary) -and
             (Test-Path -LiteralPath $ConfigPath)) {
             try {
-                Start-InstalledClient
+                if ($startupTaskExists) {
+                    Start-ElevatedStartupTask
+                } else {
+                    Start-InstalledClient
+                }
             } catch {
                 Write-Warning "Uninstall failed and the previous Windows client could not be restarted: $_"
             }
@@ -879,6 +1003,12 @@ try {
 if ($KeepConfig) {
     throw "-KeepConfig can only be used together with -Uninstall."
 }
+if ($UseElevatedStartup -and -not (Test-IsAdministrator)) {
+    throw "The default installation creates a highest-privilege login task and requires an administrator PowerShell. Reopen PowerShell as administrator, or explicitly use -NonElevatedStartup for a normal Windows Terminal."
+}
+if (-not $UseElevatedStartup -and (Get-StartupTask) -and -not (Test-IsAdministrator)) {
+    throw "The elevated startup task already exists. Run this mode switch in an administrator PowerShell so the task can be removed."
+}
 if ([bool]$WindowsBinaryPath -ne [bool]$LinuxBinaryPath) {
     throw "-WindowsBinaryPath and -LinuxBinaryPath must be provided together."
 }
@@ -888,6 +1018,9 @@ if (-not (Get-Command ssh.exe -ErrorAction SilentlyContinue)) {
 }
 if (-not (Get-Command scp.exe -ErrorAction SilentlyContinue)) {
     throw "scp.exe was not found. Install the Windows OpenSSH Client optional feature."
+}
+if (-not (Test-Path -LiteralPath $WindowsScriptHost)) {
+    throw "Windows Script Host was not found: $WindowsScriptHost"
 }
 if (-not $SshTarget) {
     $SshTarget = Read-Host "SSH host or alias (for example ubuntu-workbox)"
@@ -910,6 +1043,8 @@ $localRollback = Join-Path $InstallDir ".$ProgramName.$operationId.rollback.exe"
 $retainLocalRollback = $false
 $configCommitted = $false
 $shortcutCommitted = $false
+$launcherCommitted = $false
+$startupTaskCommitted = $false
 $commitStarted = $false
 $appliedTerminalUpdates = New-Object System.Collections.ArrayList
 
@@ -985,6 +1120,9 @@ try {
     $configExisted = Test-Path -LiteralPath $ConfigPath
     $existingConfig = if ($configExisted) { [IO.File]::ReadAllText($ConfigPath) } else { $null }
     $updatedConfig = Get-UpdatedConfigText $existingConfig $SshTarget $remotePasteDirectory
+    $launcherExisted = Test-Path -LiteralPath $LauncherPath
+    $existingLauncher = if ($launcherExisted) { [IO.File]::ReadAllText($LauncherPath) } else { $null }
+    $updatedLauncher = Get-ClientLauncherText
 
     # Creating a temporary shortcut verifies COM availability without touching
     # the user's Startup folder during preflight.
@@ -1008,6 +1146,13 @@ try {
     $shortcutBackup = Join-Path $TempDir "startup-shortcut.lnk"
     if ($shortcutExisted) {
         Copy-Item -LiteralPath $shortcutPath -Destination $shortcutBackup
+    }
+    $existingStartupTask = Get-StartupTask
+    $startupTaskExisted = [bool]$existingStartupTask
+    $existingStartupTaskXml = if ($startupTaskExisted) {
+        Export-ScheduledTask -TaskName $StartupTaskName
+    } else {
+        $null
     }
 
     $remoteState = ((& ssh.exe @SshOptions -- $SshTarget "if [ -e ~/.local/bin/$ProgramName ]; then printf yes; else printf no; fi") -join "`n").Trim()
@@ -1071,18 +1216,30 @@ try {
         Write-Host "Updated SSH target and kept other settings: $ConfigPath"
     }
 
-    $shortcut = $wscriptShell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $InstalledBinary
-    $shortcut.Arguments = "client `"$ConfigPath`""
-    $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.WindowStyle = 7
+    $launcherCommitted = $true
+    Set-TextFileAtomically $LauncherPath $launcherExisted $existingLauncher $updatedLauncher
+
+    $startupTaskCommitted = $true
+    if ($UseElevatedStartup) {
+        Register-ElevatedStartupTask
+    } else {
+        Remove-ElevatedStartupTask
+    }
+
     # Save can partially replace an existing .lnk before surfacing an error.
     $shortcutCommitted = $true
-    $shortcut.Save()
+    if ($UseElevatedStartup) {
+        Remove-Item -Force -LiteralPath $shortcutPath -ErrorAction SilentlyContinue
+    } else {
+        Set-StartupShortcut $shortcutPath
+    }
 
-    Start-InstalledClient
-    Start-Sleep -Milliseconds 500
-    if (-not (Test-InstalledClientRunning)) {
+    if ($UseElevatedStartup) {
+        Start-ElevatedStartupTask
+    } else {
+        Start-InstalledClient
+    }
+    if (-not (Wait-InstalledClientRunning)) {
         throw "The installed Windows client exited before diagnostics. Check antivirus or application-control events, then rerun bootstrap.ps1."
     }
 
@@ -1116,6 +1273,47 @@ try {
             } catch {
                 $rollbackComplete = $false
                 Write-Warning "Could not restore the Startup shortcut: $_"
+            }
+        }
+
+        if ($startupTaskCommitted) {
+            try {
+                if ($startupTaskExisted) {
+                    Register-ScheduledTask `
+                        -TaskName $StartupTaskName `
+                        -Xml $existingStartupTaskXml `
+                        -Force | Out-Null
+                } else {
+                    Remove-ElevatedStartupTask
+                }
+            } catch {
+                $rollbackComplete = $false
+                Write-Warning "Could not restore the startup task: $_"
+            }
+        }
+
+        if ($launcherCommitted) {
+            try {
+                if (Test-Path -LiteralPath $LauncherPath) {
+                    $currentLauncher = [IO.File]::ReadAllText($LauncherPath)
+                    if ($currentLauncher -ceq $updatedLauncher) {
+                        if ($launcherExisted) {
+                            Set-TextFileAtomically $LauncherPath $true $currentLauncher $existingLauncher
+                        } else {
+                            Remove-Item -Force -LiteralPath $LauncherPath
+                        }
+                    } elseif ($launcherExisted -and $currentLauncher -ceq $existingLauncher) {
+                        # The atomic update failed before replacing the original.
+                    } else {
+                        $rollbackComplete = $false
+                        Write-Warning "Client launcher changed after installation; not overwriting concurrent changes in $LauncherPath."
+                    }
+                } elseif ($launcherExisted) {
+                    Set-TextFileAtomically $LauncherPath $false $null $existingLauncher
+                }
+            } catch {
+                $rollbackComplete = $false
+                Write-Warning "Could not restore the client launcher: $_"
             }
         }
 
@@ -1214,7 +1412,11 @@ try {
         $configurationExists = Test-Path -LiteralPath $ConfigPath
         if (Test-CanRestartPreviousClient $oldClientWasRunning $rollbackComplete $installedBinaryExists $configurationExists) {
             try {
-                Start-InstalledClient
+                if ($startupTaskExisted) {
+                    Start-ElevatedStartupTask
+                } else {
+                    Start-InstalledClient
+                }
             } catch {
                 Write-Warning "Could not restart the previous Windows client: $_"
             }

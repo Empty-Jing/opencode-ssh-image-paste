@@ -24,3 +24,4 @@
 - 图片目录权限为 `0700`，文件权限为 `0600`。
 - Receiver 对图片目录持有跨进程独占锁，避免并发连接覆盖同一槽位。
 - 编码后单张图片上限为 16 MiB；Windows client 在标准剪贴板解码器返回后限制图片边长、像素数和原始 RGBA 大小，因此这些限制不是解码峰值内存的硬上限；receiver 会在分配前校验协议长度并检查 PNG 签名。
+- 默认安装按当前 Windows 用户创建 `RunLevel=Highest` 登录计划任务，使全局键盘 Hook 和输入注入与管理员 Windows Terminal 处于相同完整性级别。安装和更新需要管理员授权，登录启动不重复弹出 UAC；只使用普通权限 Terminal 的用户可显式传入 `-NonElevatedStartup`，降低 Client 权限。

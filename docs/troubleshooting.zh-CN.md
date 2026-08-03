@@ -49,7 +49,19 @@ Get-Process opencode-ssh-image-paste -ErrorAction SilentlyContinue | Stop-Proces
 报告 API rate limit，请使用上面的命令重新下载 `bootstrap.ps1`。
 
 其他下载错误请检查 PowerShell 能否访问 `github.com` 和
-`objects.githubusercontent.com`，并确认代理没有拦截或改写 GitHub Release 下载。
+`release-assets.githubusercontent.com`，并确认代理没有拦截或改写 GitHub Release 下载。
+
+## 安装要求管理员 PowerShell
+
+这是默认且有意的行为。安装器按当前用户创建 `RunLevel=Highest` 的登录计划任务，使键盘
+Hook 和输入注入能够作用于管理员 Windows Terminal。安装和更新时需要完成一次 UAC 授权，
+后续登录启动不会再次提示。
+
+如果 Windows Terminal 始终以普通权限运行，可显式安装普通权限模式：
+
+```powershell
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -NonElevatedStartup
+```
 
 ## 任务栏仍然显示 Client 窗口
 
@@ -69,7 +81,8 @@ Get-Process opencode-ssh-image-paste -ErrorAction SilentlyContinue | Stop-Proces
 - 当前焦点位于 Windows Terminal。
 - 上传期间没有切换 Windows Terminal 窗口、Tab 或 pane。
 - 后台 Client 正在运行，并且 `doctor` 检查正常。
-- Windows Terminal 与 Client 权限级别相同；普通权限 Client 无法向提权终端注入输入。
+- Windows Terminal 与 Client 权限级别相同；默认安装为提权模式，`-NonElevatedStartup`
+  仅用于普通权限 Terminal。
 - OpenCode 当前使用的模型支持图片输入。
 
 纯文本剪贴板仍然由 Windows Terminal 自己处理，这是预期行为。

@@ -21,6 +21,82 @@ try {
 
     . (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode
 
+    Assert-True $UseElevatedStartup "Default installation no longer selects elevated startup."
+
+    # Login startup must go through the GUI-subsystem Windows Script Host. A
+    # shortcut that directly targets the console client briefly opens a window
+    # before client mode can call FreeConsole.
+    $launcherText = Get-ClientLauncherText
+    Assert-True ($launcherText -match '(?m)^shell\.Run .+, 0, False\r?$') "Client launcher does not request a hidden, asynchronous process."
+    Assert-True ($launcherText -match [regex]::Escape($InstalledBinary)) "Client launcher does not target the installed binary."
+    Assert-True ($launcherText -match [regex]::Escape($ConfigPath)) "Client launcher does not pass the installed configuration."
+
+    $startupFixture = Join-Path $testRoot "OpenCode SSH Image Paste.lnk"
+    Set-StartupShortcut $startupFixture
+    $startupShortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($startupFixture)
+    Assert-True ($startupShortcut.TargetPath -ieq $WindowsScriptHost) "Startup shortcut directly launches a console executable."
+    Assert-True ($startupShortcut.Arguments -match [regex]::Escape($LauncherPath)) "Startup shortcut does not invoke the hidden client launcher."
+
+    # Elevated startup must remain per-user and launch the same hidden VBS
+    # entrypoint at the highest run level. Mock ScheduledTasks cmdlets so the
+    # fixture never creates or modifies a machine task.
+    $script:registeredTask = $null
+    function New-ScheduledTaskAction {
+        param($Execute, $Argument, $WorkingDirectory)
+        return [pscustomobject]@{ Execute = $Execute; Argument = $Argument; WorkingDirectory = $WorkingDirectory }
+    }
+    function New-ScheduledTaskTrigger {
+        param([switch]$AtLogOn, $User)
+        return [pscustomobject]@{ AtLogOn = $AtLogOn; User = $User }
+    }
+    function New-ScheduledTaskPrincipal {
+        param($UserId, $LogonType, $RunLevel)
+        return [pscustomobject]@{ UserId = $UserId; LogonType = $LogonType; RunLevel = $RunLevel }
+    }
+    function New-ScheduledTaskSettingsSet {
+        param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, $ExecutionTimeLimit)
+        return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit }
+    }
+    function Register-ScheduledTask {
+        param($TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force)
+        $script:registeredTask = [pscustomobject]@{
+            TaskName = $TaskName
+            Action = $Action
+            Trigger = $Trigger
+            Principal = $Principal
+            Settings = $Settings
+        }
+    }
+    try {
+        Register-ElevatedStartupTask
+        Assert-True ($script:registeredTask.TaskName -eq $StartupTaskName) "Elevated startup registered the wrong task name."
+        Assert-True ($script:registeredTask.Action.Execute -ieq $WindowsScriptHost) "Elevated startup does not use Windows Script Host."
+        Assert-True ($script:registeredTask.Action.Argument -match [regex]::Escape($LauncherPath)) "Elevated startup does not invoke the hidden launcher."
+        Assert-True ($script:registeredTask.Trigger.User -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name) "Elevated startup is not scoped to the current user."
+        Assert-True ($script:registeredTask.Principal.RunLevel -eq "Highest") "Elevated startup does not request the highest run level."
+    } finally {
+        foreach ($mock in @(
+            "New-ScheduledTaskAction",
+            "New-ScheduledTaskTrigger",
+            "New-ScheduledTaskPrincipal",
+            "New-ScheduledTaskSettingsSet",
+            "Register-ScheduledTask"
+        )) {
+            Remove-Item -Force "Function:\$mock"
+        }
+    }
+
+    # WScript.Shell.Run is asynchronous. Client startup can legitimately take
+    # longer than the old fixed 500 ms delay, especially immediately after an
+    # upgrade when application-control software scans the replacement binary.
+    $script:startupProbeCalls = 0
+    $startedAfterDelay = Wait-InstalledClientRunning -TimeoutMilliseconds 1000 -Probe {
+        $script:startupProbeCalls++
+        return $script:startupProbeCalls -ge 7
+    }
+    Assert-True $startedAfterDelay "Client startup polling rejected a delayed successful launch."
+    Assert-True ($script:startupProbeCalls -eq 7) "Client startup polling did not stop after detecting the process."
+
     # Regression: deleting adjacent objects from immutable ranges must not use
     # offsets made stale by an earlier deletion.
     $owned = @(0..49 | ForEach-Object { New-OwnedAction $_ })
@@ -225,38 +301,38 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     # disagree with terminal_paste_directory, so automatic installation must
     # reject that configuration before changing either side.
     $customRemoteCommand = @"
-ssh_target = "g3make"
+ssh_target = "test-workbox"
 remote_command = "~/.local/bin/opencode-ssh-image-paste receiver --dir /custom/images"
 "@
     $customRemoteCommandRejected = $false
     try {
-        $null = Get-UpdatedConfigText $customRemoteCommand "g3make" "/home/test/.cache/opencode-ssh-image-paste"
+        $null = Get-UpdatedConfigText $customRemoteCommand "test-workbox" "/home/test/.cache/opencode-ssh-image-paste"
     } catch {
         $customRemoteCommandRejected = $_.Exception.Message -match "does not support a custom remote_command"
     }
     Assert-True $customRemoteCommandRejected "Automatic installation accepted a custom remote receiver directory."
     $quotedCustomRemoteCommand = @"
-ssh_target = "g3make"
+ssh_target = "test-workbox"
 "remote_command" = "~/.local/bin/opencode-ssh-image-paste receiver --dir /quoted/custom"
 "@
     $quotedCustomRemoteCommandRejected = $false
     try {
-        $null = Get-UpdatedConfigText $quotedCustomRemoteCommand "g3make" "/home/test/.cache/opencode-ssh-image-paste"
+        $null = Get-UpdatedConfigText $quotedCustomRemoteCommand "test-workbox" "/home/test/.cache/opencode-ssh-image-paste"
     } catch {
         $quotedCustomRemoteCommandRejected = $_.Exception.Message -match "does not support a custom remote_command"
     }
     Assert-True $quotedCustomRemoteCommandRejected "Automatic installation missed a quoted custom remote_command key."
     $defaultRemoteCommand = @"
-ssh_target = "g3make"
+ssh_target = "test-workbox"
 remote_command = "~/.local/bin/opencode-ssh-image-paste receiver"
 "@
-    $null = Get-UpdatedConfigText $defaultRemoteCommand "g3make" "/home/test/.cache/opencode-ssh-image-paste"
+    $null = Get-UpdatedConfigText $defaultRemoteCommand "test-workbox" "/home/test/.cache/opencode-ssh-image-paste"
 
     # A minimal but valid serde-defaulted TOML config must receive both fields
     # that the terminal-action client now requires.
     $minimal = "# keep`r`nssh_target = `"old`"`r`n"
-    $migrated = Get-UpdatedConfigText $minimal "g3make" "/home/test/.cache/opencode-ssh-image-paste"
-    Assert-True ($migrated -match '(?m)^ssh_target = "g3make"\r?$') "Minimal config did not update ssh_target."
+    $migrated = Get-UpdatedConfigText $minimal "test-workbox" "/home/test/.cache/opencode-ssh-image-paste"
+    Assert-True ($migrated -match '(?m)^ssh_target = "test-workbox"\r?$') "Minimal config did not update ssh_target."
     Assert-True ($migrated -match '(?m)^remote_probe_command = "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"\r?$') "Minimal config did not add the capability probe."
     Assert-True ($migrated -match '(?m)^terminal_paste_directory = "/home/test/.cache/opencode-ssh-image-paste"\r?$') "Minimal config did not add terminal_paste_directory."
     Assert-True ($migrated -match "# keep") "Minimal config migration discarded comments."

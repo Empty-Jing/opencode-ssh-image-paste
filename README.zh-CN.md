@@ -45,14 +45,17 @@
 
 ### 1. 安装
 
-在 Windows PowerShell 中运行：
+在 Windows 中以管理员身份打开 PowerShell，然后运行：
 
 ```powershell
-iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1; .\bootstrap.ps1
+iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1 -ErrorAction Stop
+.\bootstrap.ps1
 ```
 
-按提示输入 SSH 主机或别名。安装器会检测 SSH、识别远端 Linux 架构、下载并校验
-Release 二进制、部署 Receiver、安装并启动 Windows Client、启用登录自启动，最后运行诊断。
+按提示输入 SSH 主机或别名。默认安装会按当前用户创建最高权限登录计划任务，因为 Client
+必须与管理员 Windows Terminal 保持相同完整性级别。安装或更新时只需完成一次管理员授权，
+后续登录不会弹出 UAC。安装器随后检测 SSH、识别远端 Linux 架构、下载并校验 Release
+二进制、部署 Receiver、安装并启动 Windows Client、启用提权登录自启动，最后运行诊断。
 一键安装不需要 Rust，但 SSH 必须已经配置好无需交互输入密码的密钥或 `ssh-agent` 认证。
 
 发布的 x86_64 和 aarch64 Linux Receiver 使用 musl 静态链接，不依赖远端发行版的
@@ -64,6 +67,16 @@ glibc 版本。
 iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1
 .\bootstrap.ps1 -SshTarget ubuntu-workbox
 ```
+
+如果 Windows Terminal 始终不使用管理员权限，可显式关闭默认提权模式。已有提权安装切换
+模式时仍应从管理员 PowerShell 执行，以便删除旧计划任务：
+
+```powershell
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -NonElevatedStartup
+```
+
+该参数改为创建当前用户的普通 Startup 快捷方式。普通权限 Client 无法向管理员 Terminal
+注入输入；除非 Windows Terminal 始终以普通权限运行，否则应保持默认模式。
 
 ### 2. 粘贴图片
 
@@ -84,19 +97,20 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 
 `doctor` 会检查配置、OpenSSH、Windows Terminal 及其私有粘贴 Action、SSH 连接、远端 Receiver 协议兼容性和后台 Client 进程。
 
-更新时重新执行同一条快速安装命令即可。安装器会保留已有配置，并替换本地 Client
+更新时从管理员 PowerShell 重新执行同一条快速安装命令即可。安装器会保留已有配置，并替换本地 Client
 和远端 Receiver。
 
 ### 4. 卸载
 
-删除 Windows Client、登录启动项、配置、远端 Receiver 和远端图片缓存：
+删除 Windows Client、普通或提权登录启动项、配置、远端 Receiver 和远端图片缓存：
 
 ```powershell
 .\bootstrap.ps1 -Uninstall
 ```
 
 添加 `-KeepConfig` 可以保留本地配置。如果配置已经丢失，请使用
-`-SshTarget ubuntu-workbox` 显式指定远端。
+`-SshTarget ubuntu-workbox` 显式指定远端。默认提权计划任务也要求从管理员 PowerShell
+执行卸载。
 
 ## 特性
 
@@ -200,7 +214,8 @@ ssh ubuntu-workbox "test -x ~/.local/bin/opencode-ssh-image-paste && echo ready"
 ### 安装 Windows Client
 
 把 `bootstrap.ps1` 和 `install-windows.ps1` 放在同一目录，并提供从同一个
-commit 构建的 Windows client 与 Linux receiver 二进制：
+commit 构建的 Windows client 与 Linux receiver 二进制。该本地安装与 Release 安装器
+使用相同的默认提权登录任务，因此应从管理员 PowerShell 执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `

@@ -6,6 +6,19 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Start the login client through a hidden Windows Script Host launcher so the
+  console-subsystem executable does not flash a window before detaching.
+- Trigger Windows Terminal slot actions with sequential zero-extra-info keyboard
+  events; Windows Terminal 1.24 ignored the previous marked `SendInput` batch.
+- Poll for asynchronous launcher startup instead of treating startup slower than
+  500 ms as an installation failure.
+- Use a per-user, highest-privilege login task by default so the client matches
+  administrator Windows Terminal sessions; add `-NonElevatedStartup` for an
+  explicit normal-integrity opt-out, including mode switching, rollback, and
+  uninstall cleanup.
+
 ## [0.1.5] - 2026-08-01
 
 ### Added
