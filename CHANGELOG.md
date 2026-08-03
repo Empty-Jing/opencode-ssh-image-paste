@@ -6,6 +6,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve a compact Windows Terminal `actions` array whose first element starts
+  immediately after `[`, instead of allowing the inserted end-marker comment to
+  consume that element and produce invalid JSONC.
+
 ## [0.1.6] - 2026-08-03
 
 ### Fixed

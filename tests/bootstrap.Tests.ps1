@@ -149,6 +149,17 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     $terminalDir = Join-Path $env:LOCALAPPDATA "Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState"
     $terminalSettings = Join-Path $terminalDir "settings.json"
     New-Item -ItemType Directory -Force -Path $terminalDir | Out-Null
+
+    # A valid compact actions array can place its first element directly after
+    # `[`. The inserted // END marker must terminate before that element or the
+    # line comment swallows it and leaves invalid JSONC.
+    $compactSettings = '{"actions":[{"command":"copy","id":"User.KeepInline"}]}'
+    [IO.File]::WriteAllText($terminalSettings, $compactSettings, (New-Object Text.UTF8Encoding($false)))
+    $compactUpdates = @(Get-WindowsTerminalActionUpdates "/home/test/.cache/opencode-ssh-image-paste")
+    Assert-True ($compactUpdates.Count -eq 1) "Compact actions fixture did not produce one update."
+    Assert-ValidWindowsTerminalJsonc $compactUpdates[0].Text "compact actions fixture"
+    Assert-True ($compactUpdates[0].Text -match "User.KeepInline") "Compact actions update removed the user's inline action."
+
     $initialSettings = @"
 {
   // user comment survives install and uninstall

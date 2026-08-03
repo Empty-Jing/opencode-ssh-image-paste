@@ -606,7 +606,10 @@ function Get-WindowsTerminalActionUpdates([string]$RemotePasteDirectory) {
             '"actions"\s*:\s*\[',
             [Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
-        $block = "`r`n        $TerminalActionBegin`r`n$actionLines`r`n        $TerminalActionEnd"
+        # End the marker line before the user's original first element. Compact
+        # settings may place that element immediately after the opening bracket;
+        # without this newline, the // END marker comments out the element.
+        $block = "`r`n        $TerminalActionBegin`r`n$actionLines`r`n        $TerminalActionEnd`r`n"
         if ($match.Success) {
             $openBracket = $match.Index + $match.Value.LastIndexOf("[")
             $updated = $text.Insert($openBracket + 1, $block)
