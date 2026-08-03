@@ -6,6 +6,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-03
+
 ### Fixed
 
 - Start the login client through a hidden Windows Script Host launcher so the
@@ -114,7 +116,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `doctor` diagnostics and one-command Windows/Linux bootstrap installation.
 - Release binaries for Windows x86_64, Linux x86_64, and Linux aarch64 with SHA-256 checksums.
 
-[Unreleased]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/tag/v0.1.3
