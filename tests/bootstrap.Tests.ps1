@@ -162,6 +162,23 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     # A valid compact actions array can place its first element directly after
     # `[`. The inserted // END marker must terminate before that element or the
     # line comment swallows it and leaves invalid JSONC.
+    $emptyActionsSettings = '{"actions":[]}'
+    [IO.File]::WriteAllText($terminalSettings, $emptyActionsSettings, (New-Object Text.UTF8Encoding($false)))
+    $emptyActionsUpdates = @(Get-WindowsTerminalActionUpdates "/home/test/.cache/opencode-ssh-image-paste")
+    Assert-True ($emptyActionsUpdates.Count -eq 1) "Empty actions fixture did not produce one update."
+    Assert-ValidWindowsTerminalJsonc $emptyActionsUpdates[0].Text "empty actions fixture"
+    Assert-True ($emptyActionsUpdates[0].Text -notmatch ',\s*// OpenCodeSSHImagePaste Action END\s*\]') "Empty actions update left a trailing comma before the array closed."
+
+    # v0.1.8 added a comma after every generated action. With an otherwise empty
+    # actions array, some Terminal versions rejected the comma before `]`. A
+    # rerun must remove that old block and repair the file automatically.
+    $v018BrokenSettings = $emptyActionsUpdates[0].Text -replace "(`r?`n        $([regex]::Escape($TerminalActionEnd)))", ",`$1"
+    [IO.File]::WriteAllText($terminalSettings, $v018BrokenSettings, (New-Object Text.UTF8Encoding($false)))
+    $repairedActionsUpdates = @(Get-WindowsTerminalActionUpdates "/home/test/.cache/opencode-ssh-image-paste")
+    Assert-True ($repairedActionsUpdates.Count -eq 1) "v0.1.8 repair fixture did not produce one update."
+    Assert-ValidWindowsTerminalJsonc $repairedActionsUpdates[0].Text "v0.1.8 repair fixture"
+    Assert-True ($repairedActionsUpdates[0].Text -notmatch ',\s*// OpenCodeSSHImagePaste Action END\s*\]') "Rerun did not repair the v0.1.8 trailing comma."
+
     $compactSettings = '{"actions":[{"command":"copy","id":"User.KeepInline"}]}'
     [IO.File]::WriteAllText($terminalSettings, $compactSettings, (New-Object Text.UTF8Encoding($false)))
     $compactUpdates = @(Get-WindowsTerminalActionUpdates "/home/test/.cache/opencode-ssh-image-paste")

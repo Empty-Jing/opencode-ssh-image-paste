@@ -583,7 +583,7 @@ function Get-WindowsTerminalActionUpdates([string]$RemotePasteDirectory) {
             id = "$TerminalActionId.Slot$slotText"
         } | ConvertTo-Json -Depth 4 -Compress
     }
-    $actionLines = ($actions | ForEach-Object { "        $_," }) -join "`r`n"
+    $actionLines = ($actions | ForEach-Object { "        $_" }) -join ",`r`n"
 
     $updates = @()
     foreach ($settingsPath in $settingsPaths) {
@@ -606,12 +606,15 @@ function Get-WindowsTerminalActionUpdates([string]$RemotePasteDirectory) {
             '"actions"\s*:\s*\[',
             [Text.RegularExpressions.RegexOptions]::IgnoreCase
         )
-        # End the marker line before the user's original first element. Compact
-        # settings may place that element immediately after the opening bracket;
-        # without this newline, the // END marker comments out the element.
-        $block = "`r`n        $TerminalActionBegin`r`n$actionLines`r`n        $TerminalActionEnd`r`n"
         if ($match.Success) {
             $openBracket = $match.Index + $match.Value.LastIndexOf("[")
+            $nextToken = $openBracket + 1
+            while ($nextToken -lt $code.Length -and [char]::IsWhiteSpace($code[$nextToken])) { $nextToken++ }
+            $actionSuffix = if ($nextToken -lt $code.Length -and $code[$nextToken] -ne "]") { "," } else { "" }
+            # End the marker line before the user's original first element.
+            # Compact settings may place that element immediately after `[`. A
+            # comma is needed only when that original element exists.
+            $block = "`r`n        $TerminalActionBegin`r`n$actionLines$actionSuffix`r`n        $TerminalActionEnd`r`n"
             $updated = $text.Insert($openBracket + 1, $block)
         } else {
             $rootEnd = $code.LastIndexOf("}")
@@ -620,6 +623,7 @@ function Get-WindowsTerminalActionUpdates([string]$RemotePasteDirectory) {
             }
             $beforeRootEnd = $code.Substring(0, $rootEnd).TrimEnd()
             $separator = if ($beforeRootEnd.EndsWith("{") -or $beforeRootEnd.EndsWith(",")) { "" } else { "," }
+            $block = "`r`n        $TerminalActionBegin`r`n$actionLines`r`n        $TerminalActionEnd`r`n"
             $property = "$separator`r`n    `"actions`": [$block`r`n    ]`r`n"
             $updated = $text.Insert($rootEnd, $property)
         }
