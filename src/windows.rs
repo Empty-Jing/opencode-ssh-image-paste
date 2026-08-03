@@ -28,14 +28,14 @@ use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateMutexW, OpenProcess, PROCESS_TERMINATE, TerminateProcess,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
-    VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_V,
+    GetAsyncKeyState, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_V,
+    keybd_event,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW,
-    KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
 };
 
 const CF_BITMAP: u32 = 2;
@@ -46,7 +46,6 @@ const DEFAULT_WINDOW_CLASS: &str = "CASCADIA_HOSTING_WINDOW_CLASS";
 const TIMING_LOG_MAX_BYTES: u64 = 1024 * 1024;
 const TERMINAL_ACTION_ID: &str = "User.OpenCodeSSHImagePaste.AtomicPaste";
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\OpenCodeSSHImagePaste.Client";
-const INPUT_EVENT_MARKER: usize = 0x4f43_5349;
 const MAX_IMAGE_DIMENSION: usize = 16_384;
 const MAX_IMAGE_PIXELS: usize = 64 * 1024 * 1024;
 const MAX_RAW_IMAGE_BYTES: usize = MAX_IMAGE_PIXELS * 4;
@@ -681,9 +680,6 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
     }
     let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
-    if event.flags & LLKHF_INJECTED != 0 && event.dwExtraInfo == INPUT_EVENT_MARKER {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
-    }
     let key_down = wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN;
     if event.vkCode != u32::from(VK_V) {
         if key_down {
@@ -1175,47 +1171,38 @@ fn wait_for_paste_keys_release() -> bool {
 }
 
 fn trigger_terminal_paste_action(slot: usize) -> Result<()> {
-    let (modifiers, key) = terminal_action_shortcut(slot)?;
-    let mut inputs = Vec::with_capacity(modifiers.len() * 2 + 2);
-    for modifier in &modifiers {
-        inputs.push(virtual_key_input(*modifier, 0));
-    }
-    inputs.push(virtual_key_input(key, 0));
-    inputs.push(virtual_key_input(key, KEYEVENTF_KEYUP));
-    for modifier in modifiers.iter().rev() {
-        inputs.push(virtual_key_input(*modifier, KEYEVENTF_KEYUP));
-    }
-
-    let count = u32::try_from(inputs.len()).context("terminal input is too large")?;
-    let size = i32::try_from(std::mem::size_of::<INPUT>()).expect("INPUT size fits in i32");
-    let sent = unsafe { SendInput(count, inputs.as_ptr(), size) };
-    if sent != count {
-        let injection_error = std::io::Error::last_os_error();
-        let cleanup = emergency_key_releases(&modifiers, key, sent as usize);
-        let released = if cleanup.is_empty() {
-            0
-        } else {
-            unsafe { SendInput(cleanup.len() as u32, cleanup.as_ptr(), size) }
-        };
-        bail!(
-            "could only inject {sent} of {count} terminal input events: {injection_error}; emergency key release inserted {released} of {} events",
-            cleanup.len()
-        )
+    // Windows Terminal 1.24 accepts the same chord from physical input and
+    // sequential zero-extra-info events, but ignores a marked SendInput batch.
+    // Build and validate every event before sending so the release half of the
+    // sequence cannot be skipped by a conversion error after key-down events.
+    let events = terminal_action_events(slot)?
+        .into_iter()
+        .map(|(key, flags)| {
+            Ok((
+                u8::try_from(key).context("terminal virtual key does not fit in a byte")?,
+                flags,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (key, flags) in events {
+        unsafe { keybd_event(key, 0, flags, 0) };
     }
     Ok(())
 }
 
-fn emergency_key_releases(modifiers: &[u16], key: u16, sent: usize) -> Vec<INPUT> {
-    let pressed_modifiers = sent.min(modifiers.len());
-    let key_was_pressed = sent > modifiers.len();
-    let mut releases = Vec::with_capacity(pressed_modifiers + if key_was_pressed { 1 } else { 0 });
-    if key_was_pressed {
-        releases.push(virtual_key_input(key, KEYEVENTF_KEYUP));
-    }
-    for modifier in modifiers[..pressed_modifiers].iter().rev() {
-        releases.push(virtual_key_input(*modifier, KEYEVENTF_KEYUP));
-    }
-    releases
+fn terminal_action_events(slot: usize) -> Result<Vec<(u16, u32)>> {
+    let (modifiers, key) = terminal_action_shortcut(slot)?;
+    let mut events = Vec::with_capacity(modifiers.len() * 2 + 2);
+    events.extend(modifiers.iter().map(|modifier| (*modifier, 0)));
+    events.push((key, 0));
+    events.push((key, KEYEVENTF_KEYUP));
+    events.extend(
+        modifiers
+            .iter()
+            .rev()
+            .map(|modifier| (*modifier, KEYEVENTF_KEYUP)),
+    );
+    Ok(events)
 }
 
 fn terminal_action_shortcut(slot: usize) -> Result<(Vec<u16>, u16)> {
@@ -1238,21 +1225,6 @@ fn terminal_action_shortcut(slot: usize) -> Result<(Vec<u16>, u16)> {
         _ => unreachable!("slot group is bounded"),
     };
     Ok((modifiers, key))
-}
-
-fn virtual_key_input(virtual_key: u16, flags: u32) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: virtual_key,
-                wScan: 0,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: INPUT_EVENT_MARKER,
-            },
-        },
-    }
 }
 
 struct Transport {
@@ -1559,11 +1531,20 @@ mod tests {
     }
 
     #[test]
-    fn emergency_release_count_tracks_inserted_key_down_events() {
-        let modifiers = [VK_CONTROL, VK_MENU, VK_SHIFT];
-        assert!(emergency_key_releases(&modifiers, VK_F13_CODE, 0).is_empty());
-        assert_eq!(emergency_key_releases(&modifiers, VK_F13_CODE, 2).len(), 2);
-        assert_eq!(emergency_key_releases(&modifiers, VK_F13_CODE, 4).len(), 4);
+    fn terminal_action_events_release_key_and_modifiers_in_reverse_order() {
+        assert_eq!(
+            terminal_action_events(49).unwrap(),
+            vec![
+                (VK_CONTROL, 0),
+                (VK_MENU, 0),
+                (VK_SHIFT, 0),
+                (VK_F12_CODE, 0),
+                (VK_F12_CODE, KEYEVENTF_KEYUP),
+                (VK_SHIFT, KEYEVENTF_KEYUP),
+                (VK_MENU, KEYEVENTF_KEYUP),
+                (VK_CONTROL, KEYEVENTF_KEYUP),
+            ]
+        );
     }
 
     #[test]
