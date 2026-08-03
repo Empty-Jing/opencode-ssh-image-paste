@@ -6,6 +6,12 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Treat the empty string produced when PowerShell coerces a `$null` string
+  argument as an absent fresh-install configuration, rather than misclassifying
+  a missing `config.toml` as an incompatible existing configuration.
+
 ## [0.1.7] - 2026-08-03
 
 ### Fixed

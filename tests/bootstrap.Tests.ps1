@@ -23,6 +23,15 @@ try {
 
     Assert-True $UseElevatedStartup "Default installation no longer selects elevated startup."
 
+    # PowerShell coerces $null passed to a [string] parameter into "". Fresh
+    # installation must treat both representations as an absent config.
+    $freshConfig = Get-UpdatedConfigText `
+        -ExistingConfig $null `
+        -Target "test-workbox" `
+        -RemotePasteDirectory "/home/test/.cache/opencode-ssh-image-paste"
+    Assert-True ($freshConfig -match '(?m)^ssh_target = "test-workbox"\r?$') "Fresh install did not create ssh_target."
+    Assert-True ($freshConfig -match '(?m)^terminal_paste_directory = "/home/test/.cache/opencode-ssh-image-paste"\r?$') "Fresh install did not create terminal_paste_directory."
+
     # Login startup must go through the GUI-subsystem Windows Script Host. A
     # shortcut that directly targets the console client briefly opens a window
     # before client mode can call FreeConsole.

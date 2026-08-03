@@ -944,7 +944,8 @@ function Get-UpdatedConfigText(
     $probeSetting = 'remote_probe_command = "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"'
     $pasteDirectorySetting = "terminal_paste_directory = $(ConvertTo-TomlBasicString $RemotePasteDirectory)"
 
-    if ($null -eq $ExistingConfig) {
+    # PowerShell coerces $null passed to a [string] parameter into "".
+    if ([string]::IsNullOrEmpty($ExistingConfig)) {
         return @"
 $targetSetting
 ssh_program = "ssh.exe"
@@ -1122,7 +1123,10 @@ try {
 
     $configExisted = Test-Path -LiteralPath $ConfigPath
     $existingConfig = if ($configExisted) { [IO.File]::ReadAllText($ConfigPath) } else { $null }
-    $updatedConfig = Get-UpdatedConfigText $existingConfig $SshTarget $remotePasteDirectory
+    $updatedConfig = Get-UpdatedConfigText `
+        -ExistingConfig $existingConfig `
+        -Target $SshTarget `
+        -RemotePasteDirectory $remotePasteDirectory
     $launcherExisted = Test-Path -LiteralPath $LauncherPath
     $existingLauncher = if ($launcherExisted) { [IO.File]::ReadAllText($LauncherPath) } else { $null }
     $updatedLauncher = Get-ClientLauncherText
@@ -1214,13 +1218,21 @@ try {
     # An atomic replace can commit before surfacing an error. Mark the config as
     # potentially committed first so the outer rollback always inspects it.
     $configCommitted = $true
-    Set-TextFileAtomically $ConfigPath $configExisted $existingConfig $updatedConfig
+    Set-TextFileAtomically `
+        -Path $ConfigPath `
+        -ExpectedExists $configExisted `
+        -ExpectedText $existingConfig `
+        -NewText $updatedConfig
     if ($configExisted) {
         Write-Host "Updated SSH target and kept other settings: $ConfigPath"
     }
 
     $launcherCommitted = $true
-    Set-TextFileAtomically $LauncherPath $launcherExisted $existingLauncher $updatedLauncher
+    Set-TextFileAtomically `
+        -Path $LauncherPath `
+        -ExpectedExists $launcherExisted `
+        -ExpectedText $existingLauncher `
+        -NewText $updatedLauncher
 
     $startupTaskCommitted = $true
     if ($UseElevatedStartup) {
@@ -1312,7 +1324,11 @@ try {
                         Write-Warning "Client launcher changed after installation; not overwriting concurrent changes in $LauncherPath."
                     }
                 } elseif ($launcherExisted) {
-                    Set-TextFileAtomically $LauncherPath $false $null $existingLauncher
+                    Set-TextFileAtomically `
+                        -Path $LauncherPath `
+                        -ExpectedExists $false `
+                        -ExpectedText $null `
+                        -NewText $existingLauncher
                 }
             } catch {
                 $rollbackComplete = $false
@@ -1337,7 +1353,11 @@ try {
                         Write-Warning "Configuration changed after installation; not overwriting concurrent changes in $ConfigPath."
                     }
                 } elseif ($configExisted) {
-                    Set-TextFileAtomically $ConfigPath $false $null $existingConfig
+                    Set-TextFileAtomically `
+                        -Path $ConfigPath `
+                        -ExpectedExists $false `
+                        -ExpectedText $null `
+                        -NewText $existingConfig
                 }
             } catch {
                 $rollbackComplete = $false
