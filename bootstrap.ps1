@@ -509,7 +509,8 @@ function Set-TextFileAtomically(
     [bool]$ExpectedExists,
     [AllowNull()][string]$ExpectedText,
     [string]$NewText,
-    [switch]$ValidateJsonc
+    [switch]$ValidateJsonc,
+    [string]$FaultPrefix = "AtomicWrite"
 ) {
     $directory = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $directory)) {
@@ -551,7 +552,7 @@ function Set-TextFileAtomically(
         if ($ExpectedExists -and ([IO.File]::ReadAllText($Path) -cne $ExpectedText)) {
             throw "$Path changed while the installer was writing its update. Rerun bootstrap.ps1."
         }
-        Invoke-BootstrapTestFault "AtomicWriteBeforeReplace"
+        Invoke-BootstrapTestFault "${FaultPrefix}BeforeReplace"
 
         if ($ExpectedExists) {
             # ReplaceFile can commit and still surface an exceptional return.
@@ -562,7 +563,7 @@ function Set-TextFileAtomically(
             [IO.File]::Move($temporary, $Path)
             $replaced = $true
         }
-        Invoke-BootstrapTestFault "AtomicWriteAfterReplace"
+        Invoke-BootstrapTestFault "${FaultPrefix}AfterReplace"
 
         if ($ValidateJsonc) {
             Assert-ValidWindowsTerminalJsonc ([IO.File]::ReadAllText($Path)) $Path
@@ -571,7 +572,7 @@ function Set-TextFileAtomically(
         $failure = $_
         if ($replaced) {
             try {
-                Invoke-BootstrapTestFault "AtomicWriteBeforeRestore"
+                Invoke-BootstrapTestFault "${FaultPrefix}BeforeRestore"
                 if ($ExpectedExists -and (Test-Path -LiteralPath $rollback)) {
                     $failed = "$rollback.failed"
                     [IO.File]::Replace($rollback, $Path, $failed, $true)
@@ -726,7 +727,8 @@ function Apply-WindowsTerminalUpdate($Update) {
         -Path $backup `
         -ExpectedExists $backupExisted `
         -ExpectedText $existingBackup `
-        -NewText $Update.Original
+        -NewText $Update.Original `
+        -FaultPrefix "StableBackupWrite"
     $Update.BackupCreated = -not $backupExisted
     try {
         Set-TextFileAtomically $Update.Path $true $Update.Original $Update.Text -ValidateJsonc
