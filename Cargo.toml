@@ -1,6 +1,6 @@
 [package]
 name = "opencode-ssh-image-paste"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 rust-version = "1.89"
 description = "Paste Windows clipboard images into a remote OpenCode TUI over SSH"
