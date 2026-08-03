@@ -5,6 +5,7 @@ param(
     [string]$WindowsBinaryPath,
     [Parameter(Mandatory = $true)]
     [string]$LinuxBinaryPath,
+    [switch]$ElevatedStartup,
     [switch]$NonElevatedStartup
 )
 
@@ -18,4 +19,5 @@ if (-not (Test-Path -LiteralPath $bootstrap)) {
     -SshTarget $SshTarget `
     -WindowsBinaryPath $WindowsBinaryPath `
     -LinuxBinaryPath $LinuxBinaryPath `
+    -ElevatedStartup:$ElevatedStartup `
     -NonElevatedStartup:$NonElevatedStartup

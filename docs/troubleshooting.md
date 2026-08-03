@@ -54,18 +54,17 @@ For other download errors, verify that PowerShell can reach both `github.com`
 and `release-assets.githubusercontent.com`, then retry without a proxy that rewrites or
 blocks GitHub release downloads.
 
-## Installation requires an administrator PowerShell
+## Elevated Terminal support requires an administrator PowerShell
 
-This is the default and is intentional. The installer creates a per-user login
-task with `RunLevel=Highest` so the keyboard hook and input injection can work in
-an administrator Windows Terminal. Installation and updates require one UAC
-authorization, while login startup does not prompt again.
+The default installation uses a normal per-user Startup shortcut and does not
+require elevation. A normal client cannot inject input into an administrator
+Windows Terminal.
 
-If Windows Terminal always runs without administrator privileges, explicitly
-install the normal-integrity mode instead:
+If administrator Terminal support is required, run an administrator PowerShell
+and explicitly enable elevated startup:
 
 ```powershell
-.\bootstrap.ps1 -SshTarget ubuntu-workbox -NonElevatedStartup
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -ElevatedStartup
 ```
 
 ## A client window remains visible in the taskbar
@@ -88,7 +87,8 @@ Check these conditions:
 - The same Windows Terminal window and pane remained focused during upload.
 - The background client is running and `doctor` reports it as healthy.
 - Windows Terminal and the client run at the same privilege level. The default
-  installation is elevated; `-NonElevatedStartup` is only for a normal Terminal.
+  client is not elevated; administrator Terminal support requires
+  `-ElevatedStartup`.
 - The selected OpenCode model supports image input.
 
 Text-only clipboard content intentionally remains handled by Windows Terminal.

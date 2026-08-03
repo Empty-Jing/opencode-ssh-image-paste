@@ -45,7 +45,7 @@ You need:
 
 ### 1. Install
 
-Open PowerShell **as administrator** on Windows and run:
+Open PowerShell on Windows and run:
 
 ```powershell
 iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1 -ErrorAction Stop
@@ -53,12 +53,9 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 ```
 
 Enter an SSH host or alias when prompted. By default, the installer creates a
-per-user login task at the highest run level because the client must match an
-administrator Windows Terminal's integrity level. The one-time installation or
-update therefore requires elevation; subsequent logins do not display a UAC
-prompt. The installer then checks SSH, detects the
+normal per-user Startup shortcut. The installer then checks SSH, detects the
 remote Linux architecture, downloads checksum-verified release binaries, deploys
-the receiver, installs and starts the Windows client, enables elevated startup at login,
+the receiver, installs and starts the Windows client, enables startup at login,
 and runs diagnostics.
 
 Published Linux receivers for x86_64 and aarch64 are statically linked with
@@ -74,17 +71,18 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 The SSH target must already accept host-key and key/`ssh-agent` authentication
 without an interactive password prompt. Rust is not required for this install.
 
-For a non-elevated Windows Terminal, explicitly opt out of the default elevated
-task. Run this command from an administrator PowerShell when switching an
-existing elevated installation so the old task can be removed:
+The default client cannot inject input into an administrator Windows Terminal.
+If elevated Terminal support is required, run the installer from an administrator
+PowerShell and explicitly enable the highest-run-level login task:
 
 ```powershell
-.\bootstrap.ps1 -SshTarget ubuntu-workbox -NonElevatedStartup
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -ElevatedStartup
 ```
 
-This creates a normal per-user Startup shortcut instead. A normal client cannot
-inject input into an elevated Terminal; keep the default mode unless Terminal is
-always run without administrator privileges.
+Elevated startup trusts the client program, launcher, and configuration stored in
+the current user's writable profile. Use it only when administrator Terminal
+support is required. The previous `-NonElevatedStartup` option remains accepted
+for existing install commands but is no longer necessary.
 
 ### 2. Paste
 
@@ -107,9 +105,10 @@ Check an existing installation at any time:
 private paste action, SSH connection, remote receiver compatibility, and the
 background client process.
 
-To update, run the same quick-install command again from an administrator
-PowerShell. It keeps the existing
-configuration while replacing the local client and remote receiver.
+To update, run the same quick-install command again. It keeps the existing
+configuration while replacing the local client and remote receiver. Switching
+an existing elevated installation back to the default mode requires one run from
+an administrator PowerShell so the old scheduled task can be removed.
 
 ### 4. Uninstall
 
@@ -121,9 +120,9 @@ and remote image cache:
 ```
 
 Add `-KeepConfig` to preserve the local configuration. If the configuration is
-missing, provide the remote explicitly with `-SshTarget ubuntu-workbox`. The
-default elevated task also requires uninstall to run from an administrator
-PowerShell.
+missing, provide the remote explicitly with `-SshTarget ubuntu-workbox`. An
+installation that explicitly enabled the elevated task requires uninstall to run
+from an administrator PowerShell.
 
 ## Features
 
@@ -231,9 +230,7 @@ The command must print `ready` without stopping for a password or host confirmat
 ### Install the Windows Client
 
 Keep `bootstrap.ps1` and `install-windows.ps1` together, then provide both a
-Windows client binary and a Linux receiver binary built from the same commit.
-Run the command from an administrator PowerShell because local installation uses
-the same default elevated login task as the Release installer:
+Windows client binary and a Linux receiver binary built from the same commit:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
@@ -247,7 +244,7 @@ Installation paths:
 ```text
 Program: %LOCALAPPDATA%\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe
 Config:  %APPDATA%\OpenCodeSSHImagePaste\config.toml
-Startup: current user's Startup folder
+Startup: current user's Startup folder, or an explicit elevated login task
 ```
 
 The installer delegates to `bootstrap.ps1`, updates the existing SSH target and

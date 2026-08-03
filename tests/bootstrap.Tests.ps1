@@ -21,7 +21,19 @@ try {
 
     . (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode
 
-    Assert-True $UseElevatedStartup "Default installation no longer selects elevated startup."
+    Assert-True (-not $UseElevatedStartup) "Default installation did not select normal startup."
+    $explicitElevated = & {
+        . (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode -ElevatedStartup
+        return $UseElevatedStartup
+    }
+    Assert-True $explicitElevated "-ElevatedStartup did not select elevated startup."
+    $conflictingStartupRejected = $false
+    try {
+        & (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode -ElevatedStartup -NonElevatedStartup
+    } catch {
+        $conflictingStartupRejected = $_.Exception.Message -match "cannot be used together"
+    }
+    Assert-True $conflictingStartupRejected "Conflicting startup mode switches were not rejected."
 
     # PowerShell coerces $null passed to a [string] parameter into "". Fresh
     # installation must treat both representations as an absent config.
@@ -186,6 +198,25 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     Assert-ValidWindowsTerminalJsonc $compactUpdates[0].Text "compact actions fixture"
     Assert-True ($compactUpdates[0].Text -match "User.KeepInline") "Compact actions update removed the user's inline action."
 
+    # Composite commands can contain nested actions arrays. Project actions
+    # belong only in the root settings actions array.
+    $nestedActionsSettings = '{"keybindings":[{"command":{"action":"multipleActions","actions":[{"action":"copy"}]}}],"actions":[]}'
+    [IO.File]::WriteAllText($terminalSettings, $nestedActionsSettings, (New-Object Text.UTF8Encoding($false)))
+    $nestedActionsUpdates = @(Get-WindowsTerminalActionUpdates "/home/test/.cache/opencode-ssh-image-paste")
+    $nestedActionsResult = ConvertFrom-Json (ConvertTo-StrictJson $nestedActionsUpdates[0].Text)
+    $nestedOwned = @($nestedActionsResult.keybindings[0].command.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" })
+    $rootOwned = @($nestedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" })
+    Assert-True ($nestedOwned.Count -eq 0) "Project actions were inserted into a nested actions array."
+    Assert-True ($rootOwned.Count -eq 50) "Project actions were not inserted into the root actions array."
+
+    $escapedActionsSettings = '{"\u0061ctions":[{"command":"copy","id":"User.EscapedRoot"}]}'
+    [IO.File]::WriteAllText($terminalSettings, $escapedActionsSettings, (New-Object Text.UTF8Encoding($false)))
+    $escapedActionsUpdates = @(Get-WindowsTerminalActionUpdates "/home/test/.cache/opencode-ssh-image-paste")
+    $escapedActionsResult = ConvertFrom-Json (ConvertTo-StrictJson $escapedActionsUpdates[0].Text)
+    Assert-True (@($escapedActionsResult.PSObject.Properties).Count -eq 1) "Escaped root actions key produced a duplicate property."
+    Assert-True (@($escapedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" }).Count -eq 50) "Escaped root actions key did not receive project actions."
+    Assert-True (@($escapedActionsResult.actions | Where-Object { $_.id -eq "User.EscapedRoot" }).Count -eq 1) "Escaped root actions update removed the user action."
+
     $initialSettings = @"
 {
   // user comment survives install and uninstall
@@ -246,6 +277,7 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     try { Apply-WindowsTerminalUpdate $updates[0] } catch { $concurrencyRejected = $true }
     Assert-True $concurrencyRejected "Atomic settings update did not reject a concurrent edit."
     Assert-True ([IO.File]::ReadAllText($terminalSettings) -ceq $concurrentSettings) "Concurrent settings content was overwritten."
+    Assert-True (-not (Test-Path -LiteralPath "$terminalSettings.opencode-ssh-image-paste.backup")) "Rejected concurrent update created a stale stable backup."
 
     # If a post-replace failure cannot restore the destination, both the
     # same-directory rollback and the stable project backup must remain. Never
@@ -279,6 +311,19 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     $stableBackup = "$atomicSettings.opencode-ssh-image-paste.backup"
     Assert-True (Test-Path -LiteralPath $stableBackup) "Atomic write failure removed the stable settings backup."
     Assert-True ([IO.File]::ReadAllText($stableBackup) -ceq $atomicOriginal) "Stable settings backup did not contain the original settings."
+
+    # The stable recovery copy must describe the current operation, not the
+    # first install from months earlier.
+    $currentBeforeUpgrade = "{`r`n  `"actions`": [{`"id`":`"User.Current`"}]`r`n}`r`n"
+    [IO.File]::WriteAllText($atomicSettings, $currentBeforeUpgrade, (New-Object Text.UTF8Encoding($false)))
+    $upgradeUpdate = [pscustomobject]@{
+        Path = $atomicSettings
+        Text = $atomicUpdated
+        Original = $currentBeforeUpgrade
+        BackupCreated = $false
+    }
+    Apply-WindowsTerminalUpdate $upgradeUpdate
+    Assert-True ([IO.File]::ReadAllText($stableBackup) -ceq $currentBeforeUpgrade) "Stable settings backup was not refreshed before an upgrade."
 
     # Uninstall preflight must not stop a working client when Terminal settings
     # cannot be parsed. A later write failure, after the stop, must restart the

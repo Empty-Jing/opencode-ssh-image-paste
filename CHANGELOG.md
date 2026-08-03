@@ -6,6 +6,24 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid a trailing comma after generated actions when the existing Windows
+  Terminal root `actions` array is empty, and repair affected v0.1.8 output on
+  the next installer run.
+- Insert private paste actions only into the root Windows Terminal `actions`
+  array when nested composite-command arrays are also present.
+- Refresh the stable Windows Terminal recovery backup before each update instead
+  of retaining only the state from the first installation.
+
+### Changed
+
+- Use normal-integrity Startup by default. Administrator Terminal users must now
+  explicitly select `-ElevatedStartup`; `-NonElevatedStartup` remains accepted
+  for compatibility with existing install commands.
+- Pin CI and Release actions to reviewed commit SHAs while retaining Dependabot
+  updates for the declared action versions.
+
 ## [0.1.8] - 2026-08-03
 
 ### Fixed

@@ -225,9 +225,9 @@ flowchart TD
 - 图片检测与读取支持注册格式 PNG、`CF_DIBV5`、`CF_DIB` 和 `CF_BITMAP`。标准解码失败时，Windows GDI 会把 DIB/Bitmap 转为 32 位 RGBA；应用私有格式（例如 `PixPinData`）不参与解析。
 - 注册 PNG/DIBV5 由标准依赖库复制并解码，可能在 client 校验尺寸前分配内存；当前上限约束可接受的解码结果，不构成解码阶段峰值内存的硬上限。协议和 receiver 的帧长度仍在分配前校验。
 - 同时包含文本与图片格式时优先文本，避免破坏原文本 `Ctrl+V`。
-- Windows client 保持 console 子系统以便 `doctor` 输出诊断；安装器通过 `wscript.exe` 隐藏启动器以窗口样式 `0` 启动 client，client 进入后台后立即分离 console，因此不会在登录时闪现控制台，也不保留控制台或任务栏窗口。默认按当前用户注册 `RunLevel=Highest` 的登录计划任务，以匹配管理员 Windows Terminal；`-NonElevatedStartup` 才改用普通 Startup 快捷方式。当前没有托盘菜单和图形化状态页，进程仍会正常显示在 Windows 任务管理器中。
+- Windows client 保持 console 子系统以便 `doctor` 输出诊断；安装器通过 `wscript.exe` 隐藏启动器以窗口样式 `0` 启动 client，client 进入后台后立即分离 console，因此不会在登录时闪现控制台，也不保留控制台或任务栏窗口。默认使用当前用户的普通 Startup 快捷方式；只有显式传入 `-ElevatedStartup` 才注册 `RunLevel=Highest` 登录计划任务。当前没有托盘菜单和图形化状态页，进程仍会正常显示在 Windows 任务管理器中。
 - 自动安装只支持默认 `remote_command` 和默认 Receiver 图片目录；带 `--dir` 等自定义 Receiver 命令必须手工同步 Client 的 `terminal_paste_directory` 与 50 个 Terminal Action。
-- 自动粘贴依赖目标 Terminal 与 client 处于相同完整性级别；默认提权任务服务管理员 Terminal，显式非提权模式只服务普通 Terminal。
+- 自动粘贴依赖目标 Terminal 与 client 处于相同完整性级别；默认普通模式服务普通 Terminal，显式提权模式服务管理员 Terminal。提权模式会执行当前用户可写目录中的程序和配置，因此只作为明确接受风险的兼容选项。
 - 安装器需要修改 Windows Terminal `settings.json`；首次运行 Terminal 前没有该文件时，bootstrap 会要求先打开一次 Terminal。
 - Linux receiver 已自动化测试；真实 Windows 输入、剪贴板和 Windows Terminal 行为仍需在发布前执行手工兼容性矩阵。
 - Watchdog 通过 Win32 `TerminateProcess` 尽力中止超时 SSH；操作系统拒绝进程访问时无法形成严格超时保证。

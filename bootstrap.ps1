@@ -4,6 +4,7 @@ param(
     [string]$WindowsBinaryPath,
     [string]$LinuxBinaryPath,
     [switch]$SkipChecksum,
+    [switch]$ElevatedStartup,
     [switch]$NonElevatedStartup,
     [switch]$Uninstall,
     [switch]$KeepConfig,
@@ -26,7 +27,10 @@ $StartupTaskName = if ($InternalTestMode) {
 } else {
     "OpenCode SSH Image Paste (Elevated)"
 }
-$UseElevatedStartup = -not $NonElevatedStartup
+if ($ElevatedStartup -and $NonElevatedStartup) {
+    throw "-ElevatedStartup and -NonElevatedStartup cannot be used together."
+}
+$UseElevatedStartup = [bool]$ElevatedStartup
 $TerminalActionId = "User.OpenCodeSSHImagePaste.AtomicPaste"
 $ImageSlotCount = 50
 $TerminalActionBegin = "// OpenCodeSSHImagePaste Action BEGIN"
@@ -413,6 +417,52 @@ function Assert-ValidWindowsTerminalJsonc([string]$Text, [string]$Source) {
     }
 }
 
+function Find-RootJsonArrayOpenBracket([string]$Code, [string]$PropertyName) {
+    $objectDepth = 0
+    $arrayDepth = 0
+    for ($i = 0; $i -lt $Code.Length; $i++) {
+        $current = $Code[$i]
+        if ($current -eq '"') {
+            $start = $i
+            $escaped = $false
+            for ($i++; $i -lt $Code.Length; $i++) {
+                $current = $Code[$i]
+                if ($escaped) {
+                    $escaped = $false
+                } elseif ($current -eq "\") {
+                    $escaped = $true
+                } elseif ($current -eq '"') {
+                    break
+                }
+            }
+            if ($i -ge $Code.Length) {
+                return -1
+            }
+            if ($objectDepth -eq 1 -and $arrayDepth -eq 0) {
+                $next = $i + 1
+                while ($next -lt $Code.Length -and [char]::IsWhiteSpace($Code[$next])) { $next++ }
+                if ($next -lt $Code.Length -and $Code[$next] -eq ":") {
+                    $encodedName = $Code.Substring($start, $i - $start + 1)
+                    $name = ConvertFrom-Json -InputObject $encodedName -ErrorAction Stop
+                    $next++
+                    while ($next -lt $Code.Length -and [char]::IsWhiteSpace($Code[$next])) { $next++ }
+                    if ($name -ieq $PropertyName -and $next -lt $Code.Length -and $Code[$next] -eq "[") {
+                        return $next
+                    }
+                }
+            }
+            continue
+        }
+        switch ($current) {
+            "{" { $objectDepth++; break }
+            "}" { $objectDepth--; break }
+            "[" { $arrayDepth++; break }
+            "]" { $arrayDepth--; break }
+        }
+    }
+    return -1
+}
+
 function Set-TextFileAtomically(
     [string]$Path,
     [bool]$ExpectedExists,
@@ -601,13 +651,8 @@ function Get-WindowsTerminalActionUpdates([string]$RemotePasteDirectory) {
             }
         }
 
-        $match = [regex]::Match(
-            $code,
-            '"actions"\s*:\s*\[',
-            [Text.RegularExpressions.RegexOptions]::IgnoreCase
-        )
-        if ($match.Success) {
-            $openBracket = $match.Index + $match.Value.LastIndexOf("[")
+        $openBracket = Find-RootJsonArrayOpenBracket $code "actions"
+        if ($openBracket -ge 0) {
             $nextToken = $openBracket + 1
             while ($nextToken -lt $code.Length -and [char]::IsWhiteSpace($code[$nextToken])) { $nextToken++ }
             $actionSuffix = if ($nextToken -lt $code.Length -and $code[$nextToken] -ne "]") { "," } else { "" }
@@ -639,12 +684,19 @@ function Get-WindowsTerminalActionUpdates([string]$RemotePasteDirectory) {
 }
 
 function Apply-WindowsTerminalUpdate($Update) {
-    $utf8 = New-Object Text.UTF8Encoding($false)
-    $backup = "$($Update.Path).opencode-ssh-image-paste.backup"
-    if (-not (Test-Path -LiteralPath $backup)) {
-        [IO.File]::WriteAllText($backup, $Update.Original, $utf8)
-        $Update.BackupCreated = $true
+    if (-not (Test-Path -LiteralPath $Update.Path) -or
+        [IO.File]::ReadAllText($Update.Path) -cne $Update.Original) {
+        throw "$($Update.Path) changed while the installer was preparing its backup. Rerun bootstrap.ps1."
     }
+    $backup = "$($Update.Path).opencode-ssh-image-paste.backup"
+    $backupExisted = Test-Path -LiteralPath $backup
+    $existingBackup = if ($backupExisted) { [IO.File]::ReadAllText($backup) } else { $null }
+    Set-TextFileAtomically `
+        -Path $backup `
+        -ExpectedExists $backupExisted `
+        -ExpectedText $existingBackup `
+        -NewText $Update.Original
+    $Update.BackupCreated = -not $backupExisted
     try {
         Set-TextFileAtomically $Update.Path $true $Update.Original $Update.Text -ValidateJsonc
     } catch {
@@ -1012,7 +1064,7 @@ if ($KeepConfig) {
     throw "-KeepConfig can only be used together with -Uninstall."
 }
 if ($UseElevatedStartup -and -not (Test-IsAdministrator)) {
-    throw "The default installation creates a highest-privilege login task and requires an administrator PowerShell. Reopen PowerShell as administrator, or explicitly use -NonElevatedStartup for a normal Windows Terminal."
+    throw "-ElevatedStartup creates a highest-privilege login task and requires an administrator PowerShell. Reopen PowerShell as administrator, or omit -ElevatedStartup for a normal Windows Terminal."
 }
 if (-not $UseElevatedStartup -and (Get-StartupTask) -and -not (Test-IsAdministrator)) {
     throw "The elevated startup task already exists. Run this mode switch in an administrator PowerShell so the task can be removed."
