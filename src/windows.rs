@@ -50,8 +50,6 @@ const MAX_IMAGE_DIMENSION: usize = 16_384;
 const MAX_IMAGE_PIXELS: usize = 64 * 1024 * 1024;
 const MAX_RAW_IMAGE_BYTES: usize = MAX_IMAGE_PIXELS * 4;
 const COMMAND_WAIT_POLL: Duration = Duration::from_millis(25);
-const VK_F11_CODE: u16 = 0x7A;
-const VK_F12_CODE: u16 = 0x7B;
 const VK_F13_CODE: u16 = 0x7C;
 
 static REQUESTS: OnceLock<mpsc::SyncSender<PasteRequest>> = OnceLock::new();
@@ -1210,21 +1208,8 @@ fn terminal_action_shortcut(slot: usize) -> Result<(Vec<u16>, u16)> {
         slot < protocol::IMAGE_SLOT_COUNT,
         "image slot {slot} is out of range"
     );
-    if slot >= 48 {
-        let key = if slot == 48 { VK_F11_CODE } else { VK_F12_CODE };
-        return Ok((vec![VK_CONTROL, VK_MENU, VK_SHIFT], key));
-    }
-
-    let group = slot / 12;
-    let key = VK_F13_CODE + u16::try_from(slot % 12).expect("slot key fits in u16");
-    let modifiers = match group {
-        0 => vec![VK_CONTROL, VK_MENU, VK_SHIFT],
-        1 => vec![VK_CONTROL, VK_MENU],
-        2 => vec![VK_CONTROL, VK_SHIFT],
-        3 => vec![VK_MENU, VK_SHIFT],
-        _ => unreachable!("slot group is bounded"),
-    };
-    Ok((modifiers, key))
+    let key = VK_F13_CODE + u16::try_from(slot).expect("slot key fits in u16");
+    Ok((vec![VK_CONTROL, VK_MENU, VK_SHIFT], key))
 }
 
 struct Transport {
@@ -1232,6 +1217,8 @@ struct Transport {
     ssh_arguments: Vec<String>,
     ssh_target: String,
     remote_command: String,
+    remote_probe_command: String,
+    request_timeout_seconds: u64,
     connection: Option<Connection>,
 }
 
@@ -1242,6 +1229,8 @@ impl Transport {
             ssh_arguments: config.ssh_arguments.clone(),
             ssh_target: config.ssh_target.clone(),
             remote_command: config.remote_command.clone(),
+            remote_probe_command: config.remote_probe_command.clone(),
+            request_timeout_seconds: config.request_timeout_seconds,
             connection: None,
         }
     }
@@ -1295,8 +1284,43 @@ impl Transport {
     }
 
     fn connect(&self) -> Result<Connection> {
+        let mut probe = Command::new(&self.ssh_program);
+        configure_ssh_options(
+            &mut probe,
+            &self.ssh_arguments,
+            self.request_timeout_seconds,
+            false,
+        );
+        probe
+            .arg("-T")
+            .arg(&self.ssh_target)
+            .arg(&self.remote_probe_command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW);
+        match command_output_with_timeout(
+            &mut probe,
+            Duration::from_secs(self.request_timeout_seconds),
+        )? {
+            TimedCommandOutput::Completed(output)
+                if output.status.success()
+                    && receiver_capabilities_are_compatible(&output.stdout) => {}
+            TimedCommandOutput::Completed(_) => {
+                bail!("receiver capabilities are incompatible; rerun bootstrap.ps1")
+            }
+            TimedCommandOutput::TimedOut => {
+                bail!("receiver capability check timed out; rerun bootstrap.ps1")
+            }
+        }
+
         let mut command = Command::new(&self.ssh_program);
-        configure_ssh_options(&mut command, &self.ssh_arguments, 5, true);
+        configure_ssh_options(
+            &mut command,
+            &self.ssh_arguments,
+            self.request_timeout_seconds,
+            true,
+        );
         let mut child = command
             .arg("-T")
             .arg(&self.ssh_target)
@@ -1471,18 +1495,10 @@ mod tests {
     }
 
     #[test]
-    fn terminal_slot_shortcuts_match_all_group_boundaries() {
+    fn terminal_slot_shortcuts_match_slot_boundaries() {
         let cases = [
             (0, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F13_CODE),
-            (11, vec![VK_CONTROL, VK_MENU, VK_SHIFT], 0x87),
-            (12, vec![VK_CONTROL, VK_MENU], VK_F13_CODE),
-            (23, vec![VK_CONTROL, VK_MENU], 0x87),
-            (24, vec![VK_CONTROL, VK_SHIFT], VK_F13_CODE),
-            (35, vec![VK_CONTROL, VK_SHIFT], 0x87),
-            (36, vec![VK_MENU, VK_SHIFT], VK_F13_CODE),
-            (47, vec![VK_MENU, VK_SHIFT], 0x87),
-            (48, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F11_CODE),
-            (49, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F12_CODE),
+            (9, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F13_CODE + 9),
         ];
         for (slot, modifiers, key) in cases {
             assert_eq!(terminal_action_shortcut(slot).unwrap(), (modifiers, key));
@@ -1533,13 +1549,13 @@ mod tests {
     #[test]
     fn terminal_action_events_release_key_and_modifiers_in_reverse_order() {
         assert_eq!(
-            terminal_action_events(49).unwrap(),
+            terminal_action_events(9).unwrap(),
             vec![
                 (VK_CONTROL, 0),
                 (VK_MENU, 0),
                 (VK_SHIFT, 0),
-                (VK_F12_CODE, 0),
-                (VK_F12_CODE, KEYEVENTF_KEYUP),
+                (VK_F13_CODE + 9, 0),
+                (VK_F13_CODE + 9, KEYEVENTF_KEYUP),
                 (VK_SHIFT, KEYEVENTF_KEYUP),
                 (VK_MENU, KEYEVENTF_KEYUP),
                 (VK_CONTROL, KEYEVENTF_KEYUP),

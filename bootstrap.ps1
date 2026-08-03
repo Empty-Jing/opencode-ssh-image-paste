@@ -32,10 +32,10 @@ if ($ElevatedStartup -and $NonElevatedStartup) {
 }
 $UseElevatedStartup = [bool]$ElevatedStartup
 $TerminalActionId = "User.OpenCodeSSHImagePaste.AtomicPaste"
-$ImageSlotCount = 50
+$ImageSlotCount = 10
 $TerminalActionBegin = "// OpenCodeSSHImagePaste Action BEGIN"
 $TerminalActionEnd = "// OpenCodeSSHImagePaste Action END"
-$ExpectedCapabilities = "protocol=2;image_slots=50;response=slot-path-v1"
+$ExpectedCapabilities = "protocol=2;image_slots=10;response=slot-path-v1"
 $SshOptions = @(
     "-n", "-T",
     "-o", "BatchMode=yes",
@@ -560,18 +560,8 @@ function Get-TerminalActionBinding([int]$Slot) {
     if ($Slot -lt 0 -or $Slot -ge $ImageSlotCount) {
         throw "Image slot $Slot is out of range."
     }
-    if ($Slot -eq 48) { return "ctrl+alt+shift+f11" }
-    if ($Slot -eq 49) { return "ctrl+alt+shift+f12" }
-
     $functionKey = 13 + ($Slot % 12)
-    $prefix = switch ([Math]::Floor($Slot / 12)) {
-        0 { "ctrl+alt+shift"; break }
-        1 { "ctrl+alt"; break }
-        2 { "ctrl+shift"; break }
-        3 { "alt+shift"; break }
-        default { throw "Image slot $Slot has no terminal shortcut." }
-    }
-    return "$prefix+f$functionKey"
+    return "ctrl+alt+shift+f$functionKey"
 }
 
 function Get-JsonKeysValues($Node) {
@@ -1231,7 +1221,7 @@ try {
     Stop-InstalledClient
     Start-Sleep -Milliseconds 250
 
-    Write-Step "Configuring 50 atomic Windows Terminal paste actions"
+    Write-Step "Configuring 10 atomic Windows Terminal paste actions"
     foreach ($update in $terminalUpdates) {
         [void]$appliedTerminalUpdates.Add($update)
         Apply-WindowsTerminalUpdate $update

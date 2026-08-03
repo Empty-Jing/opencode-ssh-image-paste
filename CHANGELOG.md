@@ -18,6 +18,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Reduce the private Terminal actions and rotating receiver image slots from 50
+  to 10, aging retired v0.1.8 slot files out through the existing cleanup window.
 - Use normal-integrity Startup by default. Administrator Terminal users must now
   explicitly select `-ElevatedStartup`; `-NonElevatedStartup` remains accepted
   for compatibility with existing install commands.

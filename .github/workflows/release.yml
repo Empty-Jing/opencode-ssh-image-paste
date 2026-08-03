@@ -122,7 +122,7 @@ jobs:
             throw "Unexpected version output: '$version'"
           }
           $capabilities = ((& $binary receiver --capabilities 2>&1) -join "`n").Trim()
-          if ($LASTEXITCODE -ne 0 -or $capabilities -cne "protocol=2;image_slots=50;response=slot-path-v1") {
+          if ($LASTEXITCODE -ne 0 -or $capabilities -cne "protocol=2;image_slots=10;response=slot-path-v1") {
             throw "Unexpected capabilities output: '$capabilities'"
           }
       - name: Build static Linux release
@@ -151,7 +151,7 @@ jobs:
             echo "::error::Unexpected version output: '$version'"
             exit 1
           fi
-          if [[ "$capabilities" != "protocol=2;image_slots=50;response=slot-path-v1" ]]; then
+          if [[ "$capabilities" != "protocol=2;image_slots=10;response=slot-path-v1" ]]; then
             echo "::error::Unexpected capabilities output: '$capabilities'"
             exit 1
           fi

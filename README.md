@@ -127,10 +127,10 @@ from an administrator PowerShell.
 ## Features
 
 - One exact `Ctrl+V` shortcut: text and modified combinations such as `Ctrl+Shift+V` pass through unchanged, while image-only clipboard content uses the bridge.
-- Atomic terminal handoff: bootstrap adds 50 private slot actions without replacing Windows Terminal's normal `Ctrl+V` binding.
+- Atomic terminal handoff: bootstrap adds 10 private slot actions without replacing Windows Terminal's normal `Ctrl+V` binding.
 - Persistent SSH: the hot path does not start PowerShell, SCP, or a new SSH process.
 - Safe cancellation: automatic paste is cancelled if the user changes windows, tabs, panes, keyboard input, mouse focus, or clipboard content during upload.
-- Bounded private history: each paste uploads only its current image. The receiver directory uses `0700` and keeps the latest 50 successful pastes in `0600` image slots; the 51st successful paste replaces the oldest.
+- Bounded private history: each paste uploads only its current image. The receiver directory uses `0700` and keeps the latest 10 successful pastes in `0600` image slots; the 11th successful paste replaces the oldest.
 - Bounded protocol: encoded images are limited to 16 MiB, decoded results are checked for dimension, pixel, and RGBA-size limits, and responses are limited to 64 KiB.
 - No additional credentials: authentication reuses OpenSSH configuration, host key verification, SSH keys, or `ssh-agent`.
 
@@ -143,7 +143,7 @@ See [`docs/design.md`](docs/design.md) for the complete architecture, protocol, 
 </p>
 
 1. **Capture:** `Ctrl+V` reads the Windows clipboard image and encodes it as PNG in memory.
-2. **Transfer:** A persistent OpenSSH process sends the PNG to one of 50 private Linux receiver slots and returns its exact path.
+2. **Transfer:** A persistent OpenSSH process sends the PNG to one of 10 private Linux receiver slots and returns its exact path.
 3. **Hand off:** After focus, input, and clipboard safety checks pass, Windows Terminal atomically sends that path to OpenCode.
 
 Only the small path comes back. The original Windows image clipboard is never replaced.
@@ -248,7 +248,7 @@ Startup: current user's Startup folder, or an explicit elevated login task
 ```
 
 The installer delegates to `bootstrap.ps1`, updates the existing SSH target and
-paste directory while preserving other settings, and installs the 50 private
+paste directory while preserving other settings, and installs the 10 private
 Windows Terminal `sendInput` slot actions used for atomic image-path paste.
 
 ## Configuration
@@ -277,7 +277,7 @@ receiver commands require a manual, matching client and Terminal configuration.
 - Image detection supports registered PNG, `CF_DIBV5`, `CF_DIB`, and `CF_BITMAP`; application-private formats work only when Windows can synthesize a standard bitmap from them.
 - The standard PNG/DIBV5 decoder may allocate before decoded-result limits are checked, so those checks are not a hard peak-memory ceiling; protocol and receiver frame lengths are still validated before allocation.
 - Clipboard content containing both text and images is treated as text to preserve existing paste semantics.
-- The 50 remote slots retain images until they are overwritten or uninstalled. At the 16 MiB protocol maximum they can use up to about 800 MiB in total; normal screenshots are usually much smaller.
+- The 10 active remote slots retain images until they are overwritten or uninstalled. At the 16 MiB protocol maximum they can use up to about 160 MiB in total; normal screenshots are usually much smaller. After upgrading from the 50-slot layout, retired slots can remain for up to 24 hours before cleanup, temporarily retaining the previous higher disk usage.
 - The Windows client runs as a windowless background process and currently has no tray menu or graphical status page. It remains visible in Windows Task Manager.
 - An elevated Windows Terminal may reject input injection from a client running without elevation.
 

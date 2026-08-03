@@ -13,12 +13,12 @@
 - 文本剪贴板继续由 Windows Terminal 处理，`Ctrl+V` 行为不变；
 - 图片剪贴板使用同一个 `Ctrl+V`；
 - 图片通过常驻 SSH 通道传到 Linux，不为每次粘贴启动 PowerShell、SCP 或新 SSH；
-- Linux 原子更新 50 个私有图片槽位中的下一个槽位，Windows 触发对应的 Terminal `sendInput` Action，一次性发送 bracketed paste，OpenCode 将该路径转成图片附件；
+- Linux 原子更新 10 个私有图片槽位中的下一个槽位，Windows 触发对应的 Terminal `sendInput` Action，一次性发送 bracketed paste，OpenCode 将该路径转成图片附件；
 - 用户在上传期间切换窗口、Tab、pane、输入按键、点击鼠标或复制新内容时，自动粘贴必须取消。
 
 ## 3. 非目标
 
-- 不修改 SSH 协议、Herdr 或 OpenCode；只由安装器添加 50 个隐藏的 Windows Terminal 槽位 Action；
+- 不修改 SSH 协议、Herdr 或 OpenCode；只由安装器添加 10 个隐藏的 Windows Terminal 槽位 Action；
 - 不同步完整的 Windows/Linux 剪贴板历史；
 - 不提供文件管理、远程桌面或通用剪贴板共享；
 - 不绕过 OpenSSH 主机校验、认证或操作系统权限；
@@ -35,7 +35,7 @@ flowchart LR
     Queue --> Encode[内存编码 PNG]
     Encode --> SSH[常驻 OpenSSH 子进程]
     SSH --> Receiver[Linux receiver]
-    Receiver --> Store[原子更新 50 个私有图片槽位]
+    Receiver --> Store[原子更新 10 个私有图片槽位]
     Store --> Path[返回绝对路径]
     Path --> Guard[焦点/输入/剪贴板复核]
     Guard -->|变化| Cancel[取消自动粘贴]
@@ -56,7 +56,7 @@ flowchart LR
 
 ### 5.1 `main.rs`
 
-负责轻量命令分发。Windows 默认进入 `client`，Linux 使用 `receiver [--dir PATH]`；`receiver --print-directory` 输出 50 个 Action 共用的绝对图片目录，`receiver --capabilities` 输出安装器和 doctor 校验的协议能力。Linux 上主动启动 client 会返回明确错误。
+负责轻量命令分发。Windows 默认进入 `client`，Linux 使用 `receiver [--dir PATH]`；`receiver --print-directory` 输出 10 个 Action 共用的绝对图片目录，`receiver --capabilities` 输出安装器和 doctor 校验的协议能力。Linux 上主动启动 client 会返回明确错误。
 
 ### 5.2 `windows.rs`
 
@@ -65,15 +65,15 @@ Windows client 启动时先获取当前用户会话内的命名 Mutex，重复�
 1. 低级键盘和鼠标钩子只做快速判断、活动计数和入队，不执行阻塞工作。
 2. 单工作线程读取剪贴板、编码 PNG，并串行处理上传，避免多个请求争抢剪贴板。
 3. `Transport` 维护一个 OpenSSH 子进程，通过 stdin/stdout 复用连接，并通过 watchdog 处理阻塞。
-4. 前台窗口、剪贴板序号和用户活动代次共同防止错误注入；上传成功后根据 receiver 返回的槽位，通过对应的私有 F11-F24 组合键触发 Windows Terminal Action。
+4. 前台窗口、剪贴板序号和用户活动代次共同防止错误注入；上传成功后根据 receiver 返回的槽位，通过对应的私有 `Ctrl+Alt+Shift+F13` 到 `F22` 组合键触发 Windows Terminal Action。
 
 ### 5.3 `protocol.rs`
 
-协议使用 `OCB2`/`OCR2` 固定长度头和原始 PNG 字节，避免 Base64 膨胀和 shell 转义。所有长度在分配内存前校验；版本 2 明确表示 receiver 返回 50 槽位中的绝对路径，旧协议会直接拒绝而不会静默混用。
+协议使用 `OCB2`/`OCR2` 固定长度头和原始 PNG 字节，避免 Base64 膨胀和 shell 转义。所有长度在分配内存前校验；版本 2 表示 receiver 返回图片槽位的绝对路径，具体槽位数由精确匹配的 capability 声明，旧协议或不同槽位布局会直接拒绝而不会静默混用。
 
 ### 5.4 `receiver.rs`
 
-Receiver 在同一 SSH 进程中循环处理请求，并在进程生命周期内持有图片目录的独占文件锁，避免重复 client 或重叠 SSH 连接分配到同一槽位。每次请求只携带当前粘贴的一张图片。目录创建后设置为 `0700`；最多维护 50 个 `image-00.png` 到 `image-49.png` 槽位，每次先通过 `create_new` 写入 `0600` 临时文件，再用同目录原子 rename 替换当前槽位，保证 OpenCode 不会读取半张图片。写入失败会立即清理临时文件；managed slot 若不是普通文件则拒绝启动。第 51 次成功粘贴开始循环覆盖最旧槽位。清理任务只删除旧版 `clipboard-*.png` 和遗留临时文件。
+Receiver 在同一 SSH 进程中循环处理请求，并在进程生命周期内持有图片目录的独占文件锁，避免重复 client 或重叠 SSH 连接分配到同一槽位。每次请求只携带当前粘贴的一张图片。目录创建后设置为 `0700`；最多维护 10 个 `image-00.png` 到 `image-09.png` 槽位，每次先通过 `create_new` 写入 `0600` 临时文件，再用同目录原子 rename 替换当前槽位，保证 OpenCode 不会读取半张图片。写入失败会立即清理临时文件；managed slot 若不是普通文件则拒绝启动。第 11 次成功粘贴开始循环覆盖最旧槽位；旧 50 槽布局中退出使用的 `image-10.png` 到 `image-49.png` 会在超过 24 小时后由周期清理移除，避免升级时立即删除仍可能被引用的图片。清理任务还会删除旧版 `clipboard-*.png` 和遗留临时文件。
 
 ## 6. 关键流程
 
@@ -163,7 +163,7 @@ N bytes  png_data
 N bytes  UTF-8 path or error
 ```
 
-协议上限：图片 16 MiB，响应消息 64 KiB。帧内没有协商过程；安装器和 doctor 通过 `receiver --capabilities` 要求精确匹配 `protocol=2;image_slots=50;response=slot-path-v1`。任何破坏兼容性的修改都必须升级 magic/version 和能力串并保留清晰错误。
+协议上限：图片 16 MiB，响应消息 64 KiB。帧内没有协商过程；安装器和 doctor 通过 `receiver --capabilities` 要求精确匹配 `protocol=2;image_slots=10;response=slot-path-v1`。任何破坏帧格式的修改都必须升级 magic/version；能力变化必须更新能力串并保留清晰错误。
 
 ## 9. 剪贴板与焦点安全
 
@@ -185,7 +185,7 @@ N bytes  UTF-8 path or error
 
 ### 9.3 Windows Terminal 原子输入
 
-输出端不清空、替换或恢复 Windows 剪贴板。`bootstrap.ps1` 查询 Receiver 的绝对图片目录，并向用户的 Windows Terminal `settings.json` 添加 50 个隐藏的 `sendInput` 槽位 Action。每个 Action 持有完整的 `ESC [ 200 ~ + image-NN.png + ESC [ 201 ~`，由 Windows Terminal 一次性写入 PTY，避免逐字符 `SendInput` 被 TUI 的按键解析器拆分并留下可见 `0~`。Client 根据 Receiver 返回的槽位只模拟对应内部组合键；普通文本 `Ctrl+V` 配置不变。`doctor` 同时检查全部 50 个 Action ID 与路径，升级和卸载只替换或删除项目自己的标记块。该方案要求 client 与目标 Terminal 处于相同完整性级别。
+输出端不清空、替换或恢复 Windows 剪贴板。`bootstrap.ps1` 查询 Receiver 的绝对图片目录，并向用户的 Windows Terminal `settings.json` 添加 10 个隐藏的 `sendInput` 槽位 Action。每个 Action 持有完整的 `ESC [ 200 ~ + image-NN.png + ESC [ 201 ~`，由 Windows Terminal 一次性写入 PTY，避免逐字符 `SendInput` 被 TUI 的按键解析器拆分并留下可见 `0~`。Client 根据 Receiver 返回的槽位只模拟对应内部组合键；普通文本 `Ctrl+V` 配置不变。`doctor` 同时检查全部 10 个 Action ID 与路径，升级和卸载只替换或删除项目自己的标记块。该方案要求 client 与目标 Terminal 处于相同完整性级别。
 
 ## 10. SSH 生命周期
 
@@ -213,7 +213,7 @@ flowchart TD
 | 超大或损坏的剪贴板图片 | client 校验解码结果的边长、像素数和 RGBA 大小；标准解码器仍可能在校验前分配，残余风险为 client 内存耗尽 |
 | 非图片 payload | Receiver 校验 PNG 签名 |
 | 路径覆盖或符号链接攻击 | `0700` 私有目录、`create_new` 临时文件、同目录原子 rename |
-| 临时图片泄露 | 50 个有界图片槽位与临时文件均为 `0600`，遗留临时文件定期清理 |
+| 临时图片泄露 | 10 个活动图片槽位与临时文件均为 `0600`；旧 50 槽布局退出使用的槽位和遗留临时文件在超过 24 小时后清理，清理失败会输出错误并在后续周期重试 |
 | 上传后切换目标导致误注入 | HWND、活动代次、剪贴板 sequence 三重检查 |
 | 覆盖用户新剪贴板 | 输出路径不写入系统剪贴板，原图片始终保留 |
 | SSH 半连接或 receiver 卡死 | OpenSSH keepalive、连接超时、请求 watchdog |
@@ -226,12 +226,12 @@ flowchart TD
 - 注册 PNG/DIBV5 由标准依赖库复制并解码，可能在 client 校验尺寸前分配内存；当前上限约束可接受的解码结果，不构成解码阶段峰值内存的硬上限。协议和 receiver 的帧长度仍在分配前校验。
 - 同时包含文本与图片格式时优先文本，避免破坏原文本 `Ctrl+V`。
 - Windows client 保持 console 子系统以便 `doctor` 输出诊断；安装器通过 `wscript.exe` 隐藏启动器以窗口样式 `0` 启动 client，client 进入后台后立即分离 console，因此不会在登录时闪现控制台，也不保留控制台或任务栏窗口。默认使用当前用户的普通 Startup 快捷方式；只有显式传入 `-ElevatedStartup` 才注册 `RunLevel=Highest` 登录计划任务。当前没有托盘菜单和图形化状态页，进程仍会正常显示在 Windows 任务管理器中。
-- 自动安装只支持默认 `remote_command` 和默认 Receiver 图片目录；带 `--dir` 等自定义 Receiver 命令必须手工同步 Client 的 `terminal_paste_directory` 与 50 个 Terminal Action。
+- 自动安装只支持默认 `remote_command` 和默认 Receiver 图片目录；带 `--dir` 等自定义 Receiver 命令必须手工同步 Client 的 `terminal_paste_directory` 与 10 个 Terminal Action。
 - 自动粘贴依赖目标 Terminal 与 client 处于相同完整性级别；默认普通模式服务普通 Terminal，显式提权模式服务管理员 Terminal。提权模式会执行当前用户可写目录中的程序和配置，因此只作为明确接受风险的兼容选项。
 - 安装器需要修改 Windows Terminal `settings.json`；首次运行 Terminal 前没有该文件时，bootstrap 会要求先打开一次 Terminal。
 - Linux receiver 已自动化测试；真实 Windows 输入、剪贴板和 Windows Terminal 行为仍需在发布前执行手工兼容性矩阵。
 - Watchdog 通过 Win32 `TerminateProcess` 尽力中止超时 SSH；操作系统拒绝进程访问时无法形成严格超时保证。
-- 最多 50 个图片槽位会保留到后续循环覆盖或卸载；第 51 次成功粘贴覆盖最旧槽位，旧版随机图片和遗留临时文件超过 24 小时后清理。
+- 最多 10 个图片槽位会保留到后续循环覆盖或卸载；第 11 次成功粘贴覆盖最旧槽位，旧版随机图片和遗留临时文件超过 24 小时后清理。
 
 ## 13. 验证策略
 

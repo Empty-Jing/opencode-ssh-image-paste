@@ -6,7 +6,7 @@ ssh_program = "ssh.exe"
 ssh_arguments = []
 remote_command = "~/.local/bin/opencode-ssh-image-paste receiver"
 remote_probe_command = "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"
-# bootstrap.ps1 discovers this absolute directory and installs the matching 50
+# bootstrap.ps1 discovers this absolute directory and installs the matching 10
 # Windows Terminal sendInput slot actions. Do not change it independently.
 terminal_paste_directory = "/home/developer/.cache/opencode-ssh-image-paste"
 terminal_window_class = "CASCADIA_HOSTING_WINDOW_CLASS"

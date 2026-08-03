@@ -114,10 +114,10 @@ PowerShell 执行卸载。
 ## 特性
 
 - 只拦截精确的 `Ctrl+V`：文本以及 `Ctrl+Shift+V` 等带额外修饰键的组合原样放行，只有纯图片剪贴板内容才进入桥接。
-- 原子终端交接：bootstrap 增加 50 个私有槽位 Action，不替换 Windows Terminal 原有的 `Ctrl+V` 绑定。
+- 原子终端交接：bootstrap 增加 10 个私有槽位 Action，不替换 Windows Terminal 原有的 `Ctrl+V` 绑定。
 - 常驻 SSH：热路径不启动 PowerShell、SCP 或新的 SSH 进程。
 - 安全取消：上传期间切换窗口、Tab、pane、输入按键、改变鼠标焦点或复制新内容时，自动粘贴会被取消。
-- 有界私有历史：每次只上传当前粘贴的一张图片；receiver 目录权限为 `0700`，以权限为 `0600` 的图片槽位保留最近 50 次成功粘贴；第 51 次成功粘贴覆盖最旧槽位。
+- 有界私有历史：每次只上传当前粘贴的一张图片；receiver 目录权限为 `0700`，以权限为 `0600` 的图片槽位保留最近 10 次成功粘贴；第 11 次成功粘贴覆盖最旧槽位。
 - 有界协议：编码后的图片最大 16 MiB；标准解码完成后校验边长、像素数和 RGBA 大小；响应最大 64 KiB。
 - 无额外凭据：复用 OpenSSH 配置、主机密钥校验、SSH key 或 `ssh-agent`。
 
@@ -130,7 +130,7 @@ PowerShell 执行卸载。
 </p>
 
 1. **读取：** 按下 `Ctrl+V` 后，在 Windows 本地读取图片并在内存中编码为 PNG。
-2. **传输：** 常驻 OpenSSH 进程将 PNG 传到 Linux receiver 的 50 个私有槽位之一，并返回准确路径。
+2. **传输：** 常驻 OpenSSH 进程将 PNG 传到 Linux receiver 的 10 个私有槽位之一，并返回准确路径。
 3. **交接：** 焦点、输入和剪贴板安全检查通过后，Windows Terminal 将该路径原子发送给 OpenCode。
 
 返回 Windows 的只有一小段路径，原始图片剪贴板不会被替换。
@@ -231,7 +231,7 @@ powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
 ```
 
 安装脚本会调用 `bootstrap.ps1`，只更新已有配置中的 SSH 目标和远端粘贴目录，
-保留其他设置，并安装用于原子粘贴图片路径的 50 个 Windows Terminal 私有 `sendInput` 槽位 Action。
+保留其他设置，并安装用于原子粘贴图片路径的 10 个 Windows Terminal 私有 `sendInput` 槽位 Action。
 
 ## 配置
 
@@ -258,7 +258,7 @@ request_timeout_seconds = 15
 - 图片检测支持注册格式 PNG、`CF_DIBV5`、`CF_DIB` 和 `CF_BITMAP`；应用私有格式只有在 Windows 能将其合成为标准 Bitmap 时才可使用。
 - 标准 PNG/DIBV5 解码器可能在结果校验前分配内存，因此这些校验不是解码峰值内存的硬上限；协议和 receiver 仍会在分配前校验帧长度。
 - 同时包含文本与图片时按文本处理，避免改变原有粘贴语义。
-- 远端 50 个槽位会保留图片直到被覆盖或卸载；按每张 16 MiB 的协议上限计算，最坏约占 800 MiB，普通截图通常远小于该值。
+- 远端 10 个活动槽位会保留图片直到被覆盖或卸载；按每张 16 MiB 的协议上限计算，最坏约占 160 MiB，普通截图通常远小于该值。从旧 50 槽布局升级后，退出使用的旧槽可能继续保留最多 24 小时，清理前会暂时维持原有的较高磁盘占用。
 - Windows client 以无窗口后台进程运行，当前没有托盘菜单或图形化状态页；它仍会正常显示在 Windows 任务管理器中。
 - 提权 Windows Terminal 可能拒绝普通权限 client 的输入注入。
 

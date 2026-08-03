@@ -11,6 +11,7 @@ const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const RECEIVER_LOCK_FILE: &str = ".receiver.lock";
 const RECEIVER_LOCK_WAIT: Duration = Duration::from_secs(1);
 const RECEIVER_LOCK_POLL: Duration = Duration::from_millis(25);
+const LEGACY_IMAGE_SLOT_COUNT: usize = 50;
 
 pub fn run(directory: Option<PathBuf>) -> Result<()> {
     let directory = prepare_directory(directory)?;
@@ -232,10 +233,27 @@ fn initial_slot(directory: &Path) -> Result<usize> {
 }
 
 fn cleanup(directory: &Path) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!(
+                "could not inspect cleanup directory {}: {error}",
+                directory.display()
+            );
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!(
+                    "could not inspect an entry in {}: {error}",
+                    directory.display()
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         let managed = path
             .file_name()
@@ -244,19 +262,37 @@ fn cleanup(directory: &Path) {
                 (name.starts_with("clipboard-") && name.ends_with(".png"))
                     || ((name.starts_with(".latest-") || name.starts_with(".image-"))
                         && name.ends_with(".tmp"))
+                    || is_retired_image_slot(name)
             });
         if !managed {
             continue;
         }
-        let stale = entry
+        let stale = match entry
             .metadata()
             .and_then(|metadata| metadata.modified())
             .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
-            .is_ok_and(|elapsed| elapsed > MAX_AGE);
-        if stale {
-            let _ = fs::remove_file(path);
+        {
+            Ok(elapsed) => elapsed > MAX_AGE,
+            Err(error) => {
+                eprintln!(
+                    "could not inspect cleanup candidate {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if stale && let Err(error) = fs::remove_file(&path) {
+            eprintln!("could not remove stale file {}: {error}", path.display());
         }
     }
+}
+
+fn is_retired_image_slot(name: &str) -> bool {
+    name.strip_prefix("image-")
+        .and_then(|value| value.strip_suffix(".png"))
+        .filter(|value| value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|slot| (protocol::IMAGE_SLOT_COUNT..LEGACY_IMAGE_SLOT_COUNT).contains(&slot))
 }
 
 #[cfg(all(test, unix))]
@@ -346,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_fifty_images_then_reuses_the_oldest_slot() {
+    fn keeps_ten_images_then_reuses_the_oldest_slot() {
         let directory = temp_directory("slots");
         let _ = fs::remove_dir_all(&directory);
         ensure_directory(&directory).unwrap();
@@ -364,7 +400,7 @@ mod tests {
         let path = store(
             &directory,
             Request {
-                id: 51,
+                id: protocol::IMAGE_SLOT_COUNT as u64,
                 png: replacement.clone(),
             },
             &mut next_slot,
@@ -381,6 +417,17 @@ mod tests {
             protocol::IMAGE_SLOT_COUNT
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recognizes_slots_retired_from_the_fifty_slot_layout() {
+        assert!(!is_retired_image_slot("image-09.png"));
+        assert!(is_retired_image_slot("image-10.png"));
+        assert!(is_retired_image_slot("image-49.png"));
+        assert!(!is_retired_image_slot("image-50.png"));
+        assert!(!is_retired_image_slot("image-010.png"));
+        assert!(!is_retired_image_slot("image-0010.png"));
+        assert!(!is_retired_image_slot("image-invalid.png"));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use std::io::{self, Read, Write};
 
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
-pub const IMAGE_SLOT_COUNT: usize = 50;
-pub const CAPABILITIES: &str = "protocol=2;image_slots=50;response=slot-path-v1";
+pub const IMAGE_SLOT_COUNT: usize = 10;
+pub const CAPABILITIES: &str = "protocol=2;image_slots=10;response=slot-path-v1";
 const REQUEST_MAGIC: &[u8; 4] = b"OCB2";
 const RESPONSE_MAGIC: &[u8; 4] = b"OCR2";
 
@@ -134,7 +134,7 @@ mod tests {
     fn capability_slot_count_matches_protocol_constant() {
         assert_eq!(
             CAPABILITIES,
-            "protocol=2;image_slots=50;response=slot-path-v1"
+            "protocol=2;image_slots=10;response=slot-path-v1"
         );
         assert!(CAPABILITIES.contains(&format!("image_slots={IMAGE_SLOT_COUNT}")));
     }

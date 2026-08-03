@@ -120,6 +120,7 @@ try {
 
     # Regression: deleting adjacent objects from immutable ranges must not use
     # offsets made stale by an earlier deletion.
+    # Cleanup must remain compatible with the 50 actions installed by v0.1.8.
     $owned = @(0..49 | ForEach-Object { New-OwnedAction $_ })
     $onlyOwned = "{`r`n  `"actions`": [`r`n" + ($owned -join ",`r`n") + "`r`n  ]`r`n}"
     $cleaned = Remove-OurTerminalAction $onlyOwned
@@ -207,14 +208,14 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     $nestedOwned = @($nestedActionsResult.keybindings[0].command.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" })
     $rootOwned = @($nestedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" })
     Assert-True ($nestedOwned.Count -eq 0) "Project actions were inserted into a nested actions array."
-    Assert-True ($rootOwned.Count -eq 50) "Project actions were not inserted into the root actions array."
+    Assert-True ($rootOwned.Count -eq 10) "Project actions were not inserted into the root actions array."
 
     $escapedActionsSettings = '{"\u0061ctions":[{"command":"copy","id":"User.EscapedRoot"}]}'
     [IO.File]::WriteAllText($terminalSettings, $escapedActionsSettings, (New-Object Text.UTF8Encoding($false)))
     $escapedActionsUpdates = @(Get-WindowsTerminalActionUpdates "/home/test/.cache/opencode-ssh-image-paste")
     $escapedActionsResult = ConvertFrom-Json (ConvertTo-StrictJson $escapedActionsUpdates[0].Text)
     Assert-True (@($escapedActionsResult.PSObject.Properties).Count -eq 1) "Escaped root actions key produced a duplicate property."
-    Assert-True (@($escapedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" }).Count -eq 50) "Escaped root actions key did not receive project actions."
+    Assert-True (@($escapedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" }).Count -eq 10) "Escaped root actions key did not receive project actions."
     Assert-True (@($escapedActionsResult.actions | Where-Object { $_.id -eq "User.EscapedRoot" }).Count -eq 1) "Escaped root actions update removed the user action."
 
     $initialSettings = @"
@@ -230,13 +231,13 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     Install-WindowsTerminalAction "/home/test/.cache/opencode-ssh-image-paste"
     $firstInstall = [IO.File]::ReadAllText($terminalSettings)
     Assert-ValidWindowsTerminalJsonc $firstInstall "first install"
-    Assert-True ([regex]::Matches($firstInstall, 'User\.OpenCodeSSHImagePaste\.AtomicPaste\.Slot\d{2}').Count -eq 50) "First install did not create exactly 50 actions."
-    Assert-True ($firstInstall -notmatch 'OpenCode SSH Image Paste \d{2}') "Internal actions should not add 50 command-palette names."
+    Assert-True ([regex]::Matches($firstInstall, 'User\.OpenCodeSSHImagePaste\.AtomicPaste\.Slot\d{2}').Count -eq 10) "First install did not create exactly 10 actions."
+    Assert-True ($firstInstall -notmatch 'OpenCode SSH Image Paste \d{2}') "Internal actions should not add command-palette names."
 
     Install-WindowsTerminalAction "/home/test/.cache/opencode-ssh-image-paste"
     $secondInstall = [IO.File]::ReadAllText($terminalSettings)
     Assert-ValidWindowsTerminalJsonc $secondInstall "second install"
-    Assert-True ([regex]::Matches($secondInstall, 'User\.OpenCodeSSHImagePaste\.AtomicPaste\.Slot\d{2}').Count -eq 50) "Repeated install duplicated slot actions."
+    Assert-True ([regex]::Matches($secondInstall, 'User\.OpenCodeSSHImagePaste\.AtomicPaste\.Slot\d{2}').Count -eq 10) "Repeated install duplicated slot actions."
 
     Uninstall-WindowsTerminalAction
     $afterUninstall = [IO.File]::ReadAllText($terminalSettings)
