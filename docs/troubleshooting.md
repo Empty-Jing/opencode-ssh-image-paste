@@ -93,6 +93,20 @@ Check these conditions:
 
 Text-only clipboard content intentionally remains handled by Windows Terminal.
 
+## HTTPS installation prerequisites fail
+
+HTTPS is the default. For a non-interactive install, pass the fixed LAN host/IP explicitly; port `47832` is the default:
+
+```powershell
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -HttpsHost 10.0.0.8 -HttpsPort 47832
+```
+
+The remote user must have a working `systemctl --user` session and `loginctl show-user "$USER" -p Linger --value` must print `yes`. Ask an administrator to run `loginctl enable-linger USER` if needed. Confirm the configured LAN host resolves to the receiver and the port is reachable. Bootstrap never changes firewall rules.
+
+The generated certificate SAN contains exactly the configured host/IP. Do not replace `https://10.0.0.8:47832` with another alias unless you rerun bootstrap with that alias. Do not disable TLS verification. A `401` from `/v1/capabilities` means the local and receiver tokens differ; rerun bootstrap transactionally rather than copying tokens through a command line.
+
+HTTPS and stdio receivers cannot share one image directory. For explicit fallback, rerun `bootstrap.ps1 -SshTarget ubuntu-workbox -LegacySshTransport`; bootstrap writes `transport = "ssh"`, stops and disables the systemd user service, and verifies it is inactive. HTTPS failures are reported and never silently retried through SSH.
+
 ## Receiver compatibility check fails
 
 Verify the remote binary directly:
@@ -144,12 +158,11 @@ Follow it live from PowerShell while testing:
 Get-Content "$env:APPDATA\OpenCodeSSHImagePaste\timing.log" -Wait -Tail 20
 ```
 
-Each line reports `queue_ms`, `clipboard_read_ms`, `png_encode_ms`,
+Each line reports `transport=https|ssh`, `transport_state=agent_new|agent_reused` for HTTPS or `transport_state=connection_new|connection_reused|connection_reconnected` for SSH, `queue_ms`, `clipboard_read_ms`, `png_encode_ms`,
 `ssh_spawn_ms`, `upload_receiver_ms`, `modifier_wait_ms`, `terminal_paste_ms`,
 `input_guard_ms`, and `bridge_total_ms`. `output=terminal_action` confirms that the remote
 path was dispatched through its matching Windows Terminal slot action without replacing the clipboard. The record also includes image
-dimensions, raw and PNG byte counts, attempt counts, and whether the SSH connection
-was `cold`, `reused`, or `reconnected`.
+dimensions, raw and PNG byte counts, and attempt counts. HTTPS state records only whether the long-lived Agent has been used before; the client cannot observe whether its pool reused an underlying socket. SSH state describes the persistent subprocess connection.
 
 `ssh_spawn_ms` only measures creation of the local `ssh.exe` process. For a
 `cold` or `reconnected` request, SSH negotiation and receiver startup are part

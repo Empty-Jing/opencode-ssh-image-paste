@@ -1,11 +1,20 @@
-# SSH Host alias from %USERPROFILE%\.ssh\config.
-ssh_target = "ubuntu-workbox"
+# Existing configurations without this setting continue to use SSH.
+# HTTPS is selected only after the receiver service and capability probe succeed.
+transport = "https"
 
-# These defaults normally do not need to be changed.
+# HTTPS hot-path settings. The certificate is the dedicated self-signed trust root;
+# the client enforces TLS verification and disables redirects.
+https_endpoint = "https://10.0.0.8:47832"
+https_token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+https_certificate_path = "C:\\Users\\developer\\AppData\\Roaming\\OpenCodeSSHImagePaste\\receiver-cert.pem"
+
+# SSH remains required for installation, diagnostics, and explicit fallback.
+ssh_target = "ubuntu-workbox"
 ssh_program = "ssh.exe"
 ssh_arguments = []
 remote_command = "~/.local/bin/opencode-ssh-image-paste receiver"
 remote_probe_command = "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"
+
 # bootstrap.ps1 discovers this absolute directory and installs the matching 10
 # Windows Terminal sendInput slot actions. Do not change it independently.
 terminal_paste_directory = "/home/developer/.cache/opencode-ssh-image-paste"

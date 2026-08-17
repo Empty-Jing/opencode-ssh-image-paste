@@ -18,6 +18,7 @@ toml = "0.9"
 [target.'cfg(windows)'.dependencies]
 arboard = { version = "3.6", features = ["image-data"] }
 png = "0.18"
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
@@ -28,3 +29,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+getrandom = "0.3"
+rcgen = "0.14"
+tiny_http = { version = "0.12", features = ["ssl-rustls"] }

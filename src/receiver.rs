@@ -13,24 +13,55 @@ const RECEIVER_LOCK_WAIT: Duration = Duration::from_secs(1);
 const RECEIVER_LOCK_POLL: Duration = Duration::from_millis(25);
 const LEGACY_IMAGE_SLOT_COUNT: usize = 50;
 
-pub fn run(directory: Option<PathBuf>) -> Result<()> {
-    let directory = prepare_directory(directory)?;
-    let receiver_lock = acquire_receiver_lock(&directory)?;
-    cleanup(&directory);
-    let cleanup_directory = directory.clone();
-    thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_secs(60 * 60));
-            cleanup(&cleanup_directory);
-        }
-    });
+pub struct ReceiverState {
+    directory: PathBuf,
+    next_slot: usize,
+    _receiver_lock: File,
+}
 
-    let mut next_slot = initial_slot(&directory)?;
+impl ReceiverState {
+    pub fn new(directory: Option<PathBuf>) -> Result<Self> {
+        let directory = prepare_directory(directory)?;
+        let receiver_lock = acquire_receiver_lock(&directory)?;
+        cleanup(&directory);
+        let next_slot = initial_slot(&directory)?;
+        Ok(Self {
+            directory,
+            next_slot,
+            _receiver_lock: receiver_lock,
+        })
+    }
+
+    #[cfg(unix)]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    pub fn store(&mut self, request: Request) -> Result<PathBuf> {
+        store(&self.directory, request, &mut self.next_slot)
+    }
+
+    pub fn start_cleanup_thread(&self) {
+        let cleanup_directory = self.directory.clone();
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(60 * 60));
+                cleanup(&cleanup_directory);
+            }
+        });
+    }
+}
+
+pub fn run(directory: Option<PathBuf>) -> Result<()> {
+    let mut state = ReceiverState::new(directory)?;
+    state.start_cleanup_thread();
+
     let mut input = BufReader::new(std::io::stdin().lock());
     let mut output = BufWriter::new(std::io::stdout().lock());
     while let Some(request) = protocol::read_request(&mut input).context("read request")? {
         let id = request.id;
-        let result = store(&directory, request, &mut next_slot)
+        let result = state
+            .store(request)
             .map(|path| path.to_string_lossy().into_owned());
         protocol::write_response(
             &mut output,
@@ -41,7 +72,6 @@ pub fn run(directory: Option<PathBuf>) -> Result<()> {
         )
         .context("write response")?;
     }
-    drop(receiver_lock);
     Ok(())
 }
 

@@ -14,6 +14,7 @@ try {
     New-Item -ItemType Directory -Force -Path $installDir, $configDir, $terminalDir | Out-Null
     Set-Content -Path (Join-Path $installDir "opencode-ssh-image-paste.exe") -Value "test"
     Set-Content -Path (Join-Path $configDir "config.toml") -Value "test = true"
+    Set-Content -Path (Join-Path $configDir "receiver-cert.pem") -Value "https certificate fixture"
     @(
         '{',
         '  "actions": [',
@@ -35,7 +36,7 @@ try {
 
     & (Join-Path $PSScriptRoot "..\bootstrap.ps1") -Uninstall
     if (Test-Path $installDir) { throw "Uninstall did not remove the install directory." }
-    if (Test-Path $configDir) { throw "Uninstall did not remove the config directory." }
+    if (Test-Path $configDir) { throw "Uninstall did not remove the config directory or HTTPS certificate." }
     if ((Get-Content -Raw $terminalSettings) -match "OpenCodeSSHImagePaste") {
         throw "Uninstall did not remove the Windows Terminal action."
     }
@@ -54,11 +55,15 @@ try {
     New-Item -ItemType Directory -Force -Path $installDir, $configDir | Out-Null
     Set-Content -Path (Join-Path $installDir "opencode-ssh-image-paste.exe") -Value "test"
     Set-Content -Path (Join-Path $configDir "config.toml") -Value "test = true"
+    Set-Content -Path (Join-Path $configDir "receiver-cert.pem") -Value "https certificate fixture"
 
     & (Join-Path $PSScriptRoot "..\bootstrap.ps1") -Uninstall -KeepConfig
     if (Test-Path $installDir) { throw "Uninstall did not remove the install directory." }
     if (-not (Test-Path (Join-Path $configDir "config.toml"))) {
         throw "-KeepConfig did not preserve the configuration."
+    }
+    if (-not (Test-Path (Join-Path $configDir "receiver-cert.pem"))) {
+        throw "-KeepConfig did not preserve the dedicated HTTPS certificate."
     }
 } finally {
     $env:LOCALAPPDATA = $previousLocalAppData

@@ -86,6 +86,20 @@ Get-Process opencode-ssh-image-paste -ErrorAction SilentlyContinue | Stop-Proces
 
 纯文本剪贴板仍然由 Windows Terminal 自己处理，这是预期行为。
 
+## HTTPS 安装前置检查失败
+
+HTTPS 是默认模式。无交互安装必须显式传入固定内网 Host/IP；默认端口为 `47832`：
+
+```powershell
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -HttpsHost 10.0.0.8 -HttpsPort 47832
+```
+
+远端用户必须能使用 `systemctl --user`，且 `loginctl show-user "$USER" -p Linger --value` 必须输出 `yes`。否则请让管理员执行 `loginctl enable-linger USER`。同时确认配置的内网 Host 指向 Receiver 且端口可达；bootstrap 不会修改防火墙。
+
+证书 SAN 只覆盖安装时配置的 Host/IP。除非使用新 Host 重新运行 bootstrap，否则不要把 `https://10.0.0.8:47832` 换成其他别名，也不要关闭 TLS 校验。`/v1/capabilities` 返回 `401` 表示两端 Token 不一致，应重新运行安装事务，不要通过命令行复制 Token。
+
+HTTPS 与 stdio Receiver 不能占用同一图片目录。显式回退时，运行 `.\bootstrap.ps1 -SshTarget ubuntu-workbox -LegacySshTransport`；bootstrap 会写入 `transport = "ssh"`，停止并禁用 systemd 用户服务，并验证其不再 active。HTTPS 失败会直接报错，绝不会静默改走 SSH。
+
 ## Receiver 兼容性检查失败
 
 直接检查远端二进制：
@@ -134,12 +148,11 @@ ssh.exe -n -T ubuntu-workbox "~/.local/bin/opencode-ssh-image-paste receiver --c
 Get-Content "$env:APPDATA\OpenCodeSSHImagePaste\timing.log" -Wait -Tail 20
 ```
 
-每行会记录 `queue_ms`、`clipboard_read_ms`、`png_encode_ms`、
+每行会记录 `transport=https|ssh`；HTTPS 的状态为 `transport_state=agent_new|agent_reused`，SSH 的状态为 `transport_state=connection_new|connection_reused|connection_reconnected`；此外还包括 `queue_ms`、`clipboard_read_ms`、`png_encode_ms`、
 `ssh_spawn_ms`、`upload_receiver_ms`、`modifier_wait_ms`、
 `input_guard_ms`、`terminal_paste_ms` 和 `bridge_total_ms`。`output=terminal_action` 表示
 远端路径通过对应的 Windows Terminal 槽位 Action 原子发送，没有替换系统剪贴板。同时还会记录图片尺寸、
-RGBA/PNG 字节数、尝试次数，以及 SSH 连接是 `cold`、`reused` 还是
-`reconnected`。
+RGBA/PNG 字节数和尝试次数。HTTPS 状态只表示长期 Agent 是否已经用过，客户端无法观测连接池是否复用了底层 Socket；SSH 状态表示常驻子进程连接。
 
 `ssh_spawn_ms` 只表示本地 `ssh.exe` 进程的创建时间。对于 `cold` 或
 `reconnected` 请求，由于当前协议没有上传前的 ready 消息，SSH 握手和 Receiver

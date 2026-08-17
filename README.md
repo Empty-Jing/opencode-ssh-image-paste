@@ -15,7 +15,7 @@
 
 <p align="center">
   <b>Paste Windows screenshots into a remote OpenCode session with the same Ctrl+V shortcut.</b><br>
-  Text paste stays untouched. Image paste travels through your existing SSH connection.
+  Text paste stays untouched. Image paste uses a reusable, certificate-verified HTTPS connection.
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
   <em>Capture → Ctrl+V → image appears in remote OpenCode.</em>
 </p>
 
-Regular SSH only transports terminal byte streams and cannot carry images from the Windows clipboard. This tool reads clipboard images locally on Windows, transfers them to a Linux receiver through a persistent OpenSSH subprocess, and invokes a private Windows Terminal `sendInput` action that atomically pastes the matching remote image path. OpenCode then recognizes the path as an image attachment. The image clipboard is never replaced or restored.
+Regular terminal SSH cannot carry images from the Windows clipboard. This tool reads clipboard images locally on Windows, encodes them with Fast PNG compression, transfers OCB2 frames to a persistent Linux receiver over certificate-verified HTTPS, and invokes a private Windows Terminal `sendInput` action that atomically pastes the matching remote image path. OpenCode then recognizes the path as an image attachment. SSH remains the installation and explicit fallback transport; HTTPS failures never fall back automatically.
 
 ## Quick Start
 
@@ -39,8 +39,9 @@ You need:
 
 - Windows 10/11 and Windows Terminal.
 - Windows OpenSSH Client.
-- Linux OpenSSH Server.
-- Non-interactive SSH key or `ssh-agent` authentication from Windows to Linux.
+- Linux OpenSSH Server plus a working `systemd --user` manager with `Linger=yes` for HTTPS mode.
+- Non-interactive SSH key or `ssh-agent` authentication from Windows to Linux for deployment.
+- A fixed LAN hostname/IP and port reachable from Windows. The installer does not change firewalls.
 - An OpenCode model that supports image input.
 
 ### 1. Install
@@ -52,8 +53,9 @@ iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/downl
 .\bootstrap.ps1
 ```
 
-Enter an SSH host or alias when prompted. By default, the installer creates a
-normal per-user Startup shortcut. The installer then checks SSH, detects the
+Enter an SSH host or alias and the receiver's fixed LAN hostname/IP when prompted.
+HTTPS is the default transport and uses port `47832` unless `-HttpsPort` is supplied.
+By default, the installer creates a normal per-user Startup shortcut. It then checks SSH, detects the
 remote Linux architecture, downloads checksum-verified release binaries, deploys
 the receiver, installs and starts the Windows client, enables startup at login,
 and runs diagnostics.
@@ -65,11 +67,17 @@ For a non-interactive or auditable install, download the script first:
 
 ```powershell
 iwr https://github.com/Empty-Jing/opencode-ssh-image-paste/releases/latest/download/bootstrap.ps1 -OutFile bootstrap.ps1
-.\bootstrap.ps1 -SshTarget ubuntu-workbox
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -HttpsHost 10.0.0.8 -HttpsPort 47832
 ```
 
 The SSH target must already accept host-key and key/`ssh-agent` authentication
 without an interactive password prompt. Rust is not required for this install.
+Use `-LegacySshTransport` only for an explicit SSH upload fallback; omitting
+`-HttpsHost` no longer selects SSH:
+
+```powershell
+.\bootstrap.ps1 -SshTarget ubuntu-workbox -LegacySshTransport
+```
 
 The default client cannot inject input into an administrator Windows Terminal.
 If elevated Terminal support is required, run the installer from an administrator
@@ -101,9 +109,7 @@ Check an existing installation at any time:
 & "$env:LOCALAPPDATA\Programs\OpenCodeSSHImagePaste\opencode-ssh-image-paste.exe" doctor
 ```
 
-`doctor` checks the configuration, OpenSSH client, Windows Terminal and its
-private paste action, SSH connection, remote receiver compatibility, and the
-background client process.
+`doctor` checks the configuration, dedicated HTTPS certificate, Bearer-authenticated capabilities endpoint, Windows Terminal private paste actions, retained OpenSSH installation/fallback diagnostics, and the background client process. It never prints the token.
 
 To update, run the same quick-install command again. It keeps the existing
 configuration while replacing the local client and remote receiver. Switching
@@ -128,11 +134,11 @@ from an administrator PowerShell.
 
 - One exact `Ctrl+V` shortcut: text and modified combinations such as `Ctrl+Shift+V` pass through unchanged, while image-only clipboard content uses the bridge.
 - Atomic terminal handoff: bootstrap adds 10 private slot actions without replacing Windows Terminal's normal `Ctrl+V` binding.
-- Persistent SSH: the hot path does not start PowerShell, SCP, or a new SSH process.
+- Reusable HTTPS: one long-lived `ureq::Agent` pools TLS connections; authentication, TLS, and network failures do not trigger SSH fallback.
 - Safe cancellation: automatic paste is cancelled if the user changes windows, tabs, panes, keyboard input, mouse focus, or clipboard content during upload.
 - Bounded private history: each paste uploads only its current image. The receiver directory uses `0700` and keeps the latest 10 successful pastes in `0600` image slots; the 11th successful paste replaces the oldest.
 - Bounded protocol: encoded images are limited to 16 MiB, decoded results are checked for dimension, pixel, and RGBA-size limits, and responses are limited to 64 KiB.
-- No additional credentials: authentication reuses OpenSSH configuration, host key verification, SSH keys, or `ssh-agent`.
+- Dedicated trust: bootstrap generates a self-signed certificate whose SAN covers `-HttpsHost`, installs it as this connection's only trust root, and creates a 32-byte random Bearer token without placing it on a command line.
 
 See [`docs/design.md`](docs/design.md) for the complete architecture, protocol, state machine, and threat model.
 
@@ -143,7 +149,7 @@ See [`docs/design.md`](docs/design.md) for the complete architecture, protocol, 
 </p>
 
 1. **Capture:** `Ctrl+V` reads the Windows clipboard image and encodes it as PNG in memory.
-2. **Transfer:** A persistent OpenSSH process sends the PNG to one of 10 private Linux receiver slots and returns its exact path.
+2. **Transfer:** A reusable HTTPS agent sends the OCB2 PNG frame to the user-level systemd receiver, which stores it in one of 10 private slots and returns its exact path in OCR2.
 3. **Hand off:** After focus, input, and clipboard safety checks pass, Windows Terminal atomically sends that path to OpenCode.
 
 Only the small path comes back. The original Windows image clipboard is never replaced.
@@ -235,6 +241,8 @@ Windows client binary and a Linux receiver binary built from the same commit:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 `
   -SshTarget ubuntu-workbox `
+  -HttpsHost 10.0.0.8 `
+  -HttpsPort 47832 `
   -WindowsBinaryPath .\target\x86_64-pc-windows-msvc\release\opencode-ssh-image-paste.exe `
   -LinuxBinaryPath .\target\release\opencode-ssh-image-paste
 ```
@@ -253,7 +261,7 @@ Windows Terminal `sendInput` slot actions used for atomic image-path paste.
 
 ## Configuration
 
-See [`config.example.toml`](config.example.toml) for the default configuration. To use a separate SSH configuration file:
+See [`config.example.toml`](config.example.toml). Missing `transport` remains backward-compatible and selects SSH. A successful HTTPS bootstrap writes `transport = "https"`, endpoint, generated token, and dedicated certificate path. Set `transport = "ssh"` only as an explicit fallback and stop the HTTPS service first. To use a separate SSH configuration file:
 
 ```toml
 ssh_arguments = ["-F", "C:\\Users\\name\\.ssh\\config"]
@@ -280,11 +288,12 @@ receiver commands require a manual, matching client and Terminal configuration.
 - The 10 active remote slots retain images until they are overwritten or uninstalled. At the 16 MiB protocol maximum they can use up to about 160 MiB in total; normal screenshots are usually much smaller. After upgrading from the 50-slot layout, retired slots can remain for up to 24 hours before cleanup, temporarily retaining the previous higher disk usage.
 - The Windows client runs as a windowless background process and currently has no tray menu or graphical status page. It remains visible in Windows Task Manager.
 - An elevated Windows Terminal may reject input injection from a client running without elevation.
+- The `tiny_http` HTTPS receiver is intentionally a synchronous LAN-only service. Connection-level slow-client timeouts and a hard concurrent-connection limit are not yet enforced, so do not expose it to the public Internet even with TLS and Bearer authentication.
 
 ## Documentation
 
 | Guide | What it covers |
-|---|---|
+| --- | --- |
 | [Troubleshooting](docs/troubleshooting.md) | SSH hangs, installer failures, background processes, paste failures, and uninstall |
 | [Design](docs/design.md) | Architecture, protocol, state machine, and threat model |
 | [Changelog](CHANGELOG.md) | Release history and unreleased changes |

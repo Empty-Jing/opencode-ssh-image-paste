@@ -6,6 +6,17 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Add a Windows upload transport seam with a reusable, certificate-verified HTTPS adapter while retaining SSH as an explicit, backward-compatible adapter.
+- Add a `tiny_http` and rustls HTTPS receiver, strict Bearer-authenticated capability/upload endpoints, receiver HTTPS initialization/configuration CLI, and a user-level systemd deployment path with linger checks and transactional cleanup.
+- Add HTTPS configuration, diagnostics, transport/connection timing fields, Fast PNG lossless coverage, and Rust/PowerShell fixtures for protocol and installer boundaries.
+
+### Changed
+
+- Encode clipboard RGBA images with lossless `png::Compression::Fast` and use HTTPS as the bootstrap-selected hot path only after a successful authenticated capability probe.
+- Keep missing `transport` configurations on SSH and never automatically downgrade an HTTPS failure to SSH.
+
 ## [0.1.9] - 2026-08-03
 
 ### Fixed

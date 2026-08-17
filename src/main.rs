@@ -1,6 +1,8 @@
 mod protocol;
 mod receiver;
 
+#[cfg(unix)]
+mod https_receiver;
 #[cfg(windows)]
 mod windows;
 
@@ -11,6 +13,15 @@ enum ReceiverMode {
     Run(Option<PathBuf>),
     PrintDirectory(Option<PathBuf>),
     PrintCapabilities,
+    #[cfg(unix)]
+    InitializeHttps {
+        config: PathBuf,
+        host: String,
+        port: u16,
+        directory: Option<PathBuf>,
+    },
+    #[cfg(unix)]
+    ServeHttps(PathBuf),
 }
 
 fn main() -> Result<()> {
@@ -23,6 +34,15 @@ fn main() -> Result<()> {
                 println!("{}", protocol::CAPABILITIES);
                 Ok(())
             }
+            #[cfg(unix)]
+            ReceiverMode::InitializeHttps {
+                config,
+                host,
+                port,
+                directory,
+            } => https_receiver::initialize(&config, &host, port, directory),
+            #[cfg(unix)]
+            ReceiverMode::ServeHttps(config) => https_receiver::serve(&config),
         },
         Some("doctor") => run_doctor(args.next().map(PathBuf::from)),
         Some("--version" | "-V") => {
@@ -43,8 +63,49 @@ fn receiver_mode(args: Vec<String>) -> Result<ReceiverMode> {
         [print, flag, value] if print == "--print-directory" && flag == "--dir" => {
             Ok(ReceiverMode::PrintDirectory(Some(PathBuf::from(value))))
         }
+        #[cfg(unix)]
+        [flag, config] if flag == "--https-config" => {
+            Ok(ReceiverMode::ServeHttps(PathBuf::from(config)))
+        }
+        #[cfg(unix)]
+        [init, config, host_flag, host, port_flag, port]
+            if init == "--init-https-config" && host_flag == "--host" && port_flag == "--port" =>
+        {
+            Ok(ReceiverMode::InitializeHttps {
+                config: PathBuf::from(config),
+                host: host.clone(),
+                port: port
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid HTTPS port: {port}"))?,
+                directory: None,
+            })
+        }
+        #[cfg(unix)]
+        [
+            init,
+            config,
+            host_flag,
+            host,
+            port_flag,
+            port,
+            dir_flag,
+            directory,
+        ] if init == "--init-https-config"
+            && host_flag == "--host"
+            && port_flag == "--port"
+            && dir_flag == "--dir" =>
+        {
+            Ok(ReceiverMode::InitializeHttps {
+                config: PathBuf::from(config),
+                host: host.clone(),
+                port: port
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid HTTPS port: {port}"))?,
+                directory: Some(PathBuf::from(directory)),
+            })
+        }
         _ => bail!(
-            "usage: opencode-ssh-image-paste receiver [--print-directory | --capabilities] [--dir PATH]"
+            "usage: opencode-ssh-image-paste receiver [--print-directory | --capabilities] [--dir PATH] | --https-config PATH | --init-https-config PATH --host HOST --port PORT [--dir PATH]"
         ),
     }
 }

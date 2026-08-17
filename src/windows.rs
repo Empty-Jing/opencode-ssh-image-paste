@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use ureq::tls::{Certificate, RootCerts, TlsConfig};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, LRESULT, SetLastError, WPARAM,
 };
@@ -85,7 +86,8 @@ struct PasteTiming {
     image_height: usize,
     raw_bytes: usize,
     png_bytes: usize,
-    connection: &'static str,
+    transport: &'static str,
+    transport_state: &'static str,
     ssh_attempts: u32,
     upload_attempts: u32,
 }
@@ -110,16 +112,29 @@ impl PasteTiming {
             image_height: 0,
             raw_bytes: 0,
             png_bytes: 0,
-            connection: "not_started",
+            transport: "not_started",
+            transport_state: "not_started",
             ssh_attempts: 0,
             upload_attempts: 0,
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum TransportKind {
+    #[default]
+    Ssh,
+    Https,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct Config {
+    transport: TransportKind,
+    https_endpoint: String,
+    https_token: String,
+    https_certificate_path: PathBuf,
     ssh_target: String,
     ssh_program: String,
     ssh_arguments: Vec<String>,
@@ -133,6 +148,10 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            transport: TransportKind::Ssh,
+            https_endpoint: String::new(),
+            https_token: String::new(),
+            https_certificate_path: PathBuf::new(),
             ssh_target: String::new(),
             ssh_program: "ssh.exe".into(),
             ssh_arguments: Vec::new(),
@@ -144,6 +163,39 @@ impl Default for Config {
             request_timeout_seconds: 15,
         }
     }
+}
+
+fn validate_https_config(config: &Config) -> Result<()> {
+    anyhow::ensure!(
+        config.https_endpoint.starts_with("https://"),
+        "https_endpoint must use https://"
+    );
+    anyhow::ensure!(
+        !config.https_endpoint.ends_with('/'),
+        "https_endpoint must not end with '/'"
+    );
+    let authority = &config.https_endpoint["https://".len()..];
+    anyhow::ensure!(
+        !authority.is_empty()
+            && !authority.contains('@')
+            && !authority.contains(['/', '?', '#'])
+            && !authority.chars().any(char::is_control),
+        "https_endpoint must contain only an HTTPS origin without credentials, path, query, or fragment"
+    );
+    anyhow::ensure!(
+        config.https_token.len() == 64
+            && config
+                .https_token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "https_token must be exactly 32 bytes encoded as 64 hexadecimal characters"
+    );
+    anyhow::ensure!(
+        config.https_certificate_path.is_file(),
+        "https_certificate_path is not a readable file: {}",
+        config.https_certificate_path.display()
+    );
+    Ok(())
 }
 
 fn validate_ssh_target(target: &str) -> Result<()> {
@@ -275,8 +327,12 @@ pub fn run(config_path: Option<PathBuf>) -> Result<()> {
     unsafe { FreeConsole() };
     let config_path = config_path.unwrap_or_else(default_config_path);
     let config = load_config(&config_path)?;
-    validate_ssh_target(&config.ssh_target)
-        .with_context(|| format!("invalid ssh_target in {}", config_path.display()))?;
+    match config.transport {
+        TransportKind::Ssh => validate_ssh_target(&config.ssh_target)
+            .with_context(|| format!("invalid ssh_target in {}", config_path.display()))?,
+        TransportKind::Https => validate_https_config(&config)
+            .with_context(|| format!("invalid HTTPS transport in {}", config_path.display()))?,
+    }
     anyhow::ensure!(
         config.request_timeout_seconds > 0,
         "request_timeout_seconds must be positive"
@@ -334,6 +390,15 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
             anyhow::bail!("doctor found {failures} problem(s)");
         }
     };
+    check(
+        "Upload transport",
+        true,
+        match config.transport {
+            TransportKind::Ssh => "ssh (legacy explicit mode)",
+            TransportKind::Https => "https",
+        },
+        &mut failures,
+    );
     let target_error = validate_ssh_target(&config.ssh_target)
         .err()
         .map(|error| format!("{error:#}"));
@@ -418,7 +483,30 @@ pub fn doctor(config_path: Option<PathBuf>) -> Result<()> {
         ),
     }
 
-    if target_error.is_none() && timeout_valid {
+    if config.transport == TransportKind::Https && timeout_valid {
+        let https_error = validate_https_config(&config)
+            .and_then(|()| HttpsTransport::new(&config))
+            .and_then(|transport| {
+                let capabilities = transport.capabilities()?;
+                anyhow::ensure!(
+                    receiver_capabilities_are_compatible(capabilities.as_bytes()),
+                    "receiver capabilities are incompatible; rerun bootstrap.ps1"
+                );
+                Ok(())
+            })
+            .err()
+            .map(|error| format!("{error:#}"));
+        check(
+            "HTTPS receiver",
+            https_error.is_none(),
+            https_error
+                .as_deref()
+                .unwrap_or("TLS, bearer authentication, and capability check succeeded"),
+            &mut failures,
+        );
+    }
+
+    if config.transport == TransportKind::Ssh && target_error.is_none() && timeout_valid {
         let mut remote = Command::new(&config.ssh_program);
         configure_ssh_options(
             &mut remote,
@@ -766,11 +854,23 @@ fn is_target_window(window: *mut core::ffi::c_void) -> bool {
 }
 
 fn worker(receiver: mpsc::Receiver<PasteRequest>, config: Config, timing_log: PathBuf) {
-    let mut transport = Transport::new(&config);
+    let mut transport = match build_transport(&config) {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("could not initialize image transport: {error:#}");
+            return;
+        }
+    };
     for request in receiver {
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let mut timing = PasteTiming::new(request_id, request.queued_at);
-        match handle_paste(request, request_id, &config, &mut transport, &mut timing) {
+        match handle_paste(
+            request,
+            request_id,
+            &config,
+            transport.as_mut(),
+            &mut timing,
+        ) {
             Ok(()) => write_timing_log(&timing_log, &timing, "ok", None),
             Err(error) => {
                 write_timing_log(&timing_log, &timing, "error", Some(&error));
@@ -784,7 +884,7 @@ fn handle_paste(
     request: PasteRequest,
     request_id: u64,
     config: &Config,
-    transport: &mut Transport,
+    transport: &mut dyn ImageTransport,
     timing: &mut PasteTiming,
 ) -> Result<()> {
     if request_changed(request) {
@@ -1009,11 +1109,12 @@ fn write_timing_log(
         .replace(['\r', '\n', '\t'], " ");
     let _ = writeln!(
         log,
-        "unix_ms={} event=paste request={} outcome={} connection={} output=terminal_action queue_ms={} clipboard_read_ms={} png_encode_ms={} ssh_spawn_ms={} retry_sleep_ms={} upload_receiver_ms={} modifier_wait_ms={} input_guard_ms={} terminal_paste_ms={} bridge_total_ms={} opencode_handoff_ms={} opencode_handoff_unix_ms={} opencode_completion=unobservable image={}x{} raw_bytes={} png_bytes={} ssh_attempts={} upload_attempts={} error={:?}",
+        "unix_ms={} event=paste request={} outcome={} transport={} transport_state={} output=terminal_action queue_ms={} clipboard_read_ms={} png_encode_ms={} ssh_spawn_ms={} retry_sleep_ms={} upload_receiver_ms={} modifier_wait_ms={} input_guard_ms={} terminal_paste_ms={} bridge_total_ms={} opencode_handoff_ms={} opencode_handoff_unix_ms={} opencode_completion=unobservable image={}x{} raw_bytes={} png_bytes={} ssh_attempts={} upload_attempts={} error={:?}",
         unix_time_ms(),
         timing.request_id,
         outcome,
-        timing.connection,
+        timing.transport,
+        timing.transport_state,
         duration_ms(Some(timing.queue)),
         duration_ms(timing.clipboard_read),
         duration_ms(timing.png_encode),
@@ -1067,6 +1168,7 @@ fn encode_png(image: &ImageData<'_>) -> Result<Vec<u8>> {
         let mut encoder = png::Encoder::new(&mut bytes, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
         encoder
             .write_header()?
             .write_image_data(&image.bytes)
@@ -1212,7 +1314,24 @@ fn terminal_action_shortcut(slot: usize) -> Result<(Vec<u16>, u16)> {
     Ok((vec![VK_CONTROL, VK_MENU, VK_SHIFT], key))
 }
 
-struct Transport {
+trait ImageTransport {
+    fn upload(
+        &mut self,
+        id: u64,
+        png: Vec<u8>,
+        timeout: Duration,
+        timing: &mut PasteTiming,
+    ) -> Result<String>;
+}
+
+fn build_transport(config: &Config) -> Result<Box<dyn ImageTransport>> {
+    match config.transport {
+        TransportKind::Ssh => Ok(Box::new(SshTransport::new(config))),
+        TransportKind::Https => Ok(Box::new(HttpsTransport::new(config)?)),
+    }
+}
+
+struct SshTransport {
     ssh_program: String,
     ssh_arguments: Vec<String>,
     ssh_target: String,
@@ -1221,7 +1340,7 @@ struct Transport {
     connection: Option<Connection>,
 }
 
-impl Transport {
+impl SshTransport {
     fn new(config: &Config) -> Self {
         Self {
             ssh_program: config.ssh_program.clone(),
@@ -1233,21 +1352,22 @@ impl Transport {
         }
     }
 
-    fn upload(
+    fn upload_request(
         &mut self,
         id: u64,
         png: Vec<u8>,
         timeout: Duration,
         timing: &mut PasteTiming,
     ) -> Result<String> {
+        timing.transport = "ssh";
         let request = Request { id, png };
         let deadline = Instant::now()
             .checked_add(timeout)
             .context("request timeout is too large")?;
-        timing.connection = if self.connection.is_some() {
-            "reused"
+        timing.transport_state = if self.connection.is_some() {
+            "connection_reused"
         } else {
-            "cold"
+            "connection_new"
         };
         for attempt in 0..2 {
             if self.connection.is_none() {
@@ -1281,7 +1401,7 @@ impl Transport {
                 Ok(path) => return Ok(path),
                 Err(error) if attempt == 0 => {
                     eprintln!("SSH clipboard connection was lost, reconnecting: {error:#}");
-                    timing.connection = "reconnected";
+                    timing.transport_state = "connection_reconnected";
                     self.connection = None;
                 }
                 Err(error) => return Err(error),
@@ -1346,6 +1466,131 @@ impl Transport {
             input,
             output,
         })
+    }
+}
+
+impl ImageTransport for SshTransport {
+    fn upload(
+        &mut self,
+        id: u64,
+        png: Vec<u8>,
+        timeout: Duration,
+        timing: &mut PasteTiming,
+    ) -> Result<String> {
+        self.upload_request(id, png, timeout, timing)
+    }
+}
+
+struct HttpsTransport {
+    agent: ureq::Agent,
+    endpoint: String,
+    token: String,
+    agent_was_used: bool,
+}
+
+impl HttpsTransport {
+    fn new(config: &Config) -> Result<Self> {
+        validate_https_config(config)?;
+        let certificate_bytes = fs::read(&config.https_certificate_path)
+            .with_context(|| format!("read {}", config.https_certificate_path.display()))?;
+        let certificate = Certificate::from_pem(&certificate_bytes)
+            .context("parse dedicated HTTPS receiver certificate")?;
+        let tls = TlsConfig::builder()
+            .root_certs(RootCerts::from([certificate]))
+            .build();
+        let agent_config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(config.request_timeout_seconds)))
+            .max_idle_age(Duration::from_secs(30 * 60))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .tls_config(tls)
+            .build();
+        Ok(Self {
+            agent: agent_config.into(),
+            endpoint: config.https_endpoint.clone(),
+            token: config.https_token.clone(),
+            agent_was_used: false,
+        })
+    }
+
+    fn capabilities(&self) -> Result<String> {
+        let url = format!("{}/v1/capabilities", self.endpoint);
+        let mut response = self
+            .agent
+            .get(&url)
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .call()
+            .context("request HTTPS receiver capabilities")?;
+        anyhow::ensure!(
+            response.status().as_u16() == 200,
+            "HTTPS receiver capability check returned HTTP {}",
+            response.status()
+        );
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(65 * 1024)
+            .read_to_vec()
+            .context("read HTTPS receiver capabilities")?;
+        anyhow::ensure!(
+            body.len() < 65 * 1024,
+            "HTTPS capability response is too large"
+        );
+        String::from_utf8(body).context("HTTPS receiver capabilities are not UTF-8")
+    }
+}
+
+impl ImageTransport for HttpsTransport {
+    fn upload(
+        &mut self,
+        id: u64,
+        png: Vec<u8>,
+        _timeout: Duration,
+        timing: &mut PasteTiming,
+    ) -> Result<String> {
+        timing.transport = "https";
+        timing.transport_state = if self.agent_was_used {
+            "agent_reused"
+        } else {
+            "agent_new"
+        };
+        self.agent_was_used = true;
+        timing.upload_attempts += 1;
+        let request = Request { id, png };
+        let mut frame = Vec::with_capacity(request.png.len() + 16);
+        protocol::write_request(&mut frame, &request).context("encode HTTPS upload frame")?;
+        let stage = Instant::now();
+        let result = (|| {
+            let url = format!("{}/v1/upload", self.endpoint);
+            let mut response = self
+                .agent
+                .post(&url)
+                .header("Authorization", &format!("Bearer {}", self.token))
+                .header("Content-Type", "application/octet-stream")
+                .send(frame.as_slice())
+                .context("send HTTPS image upload")?;
+            anyhow::ensure!(
+                response.status().as_u16() == 200,
+                "HTTPS receiver returned HTTP {}",
+                response.status()
+            );
+            let bytes = response
+                .body_mut()
+                .with_config()
+                .limit((64 * 1024 + 18) as u64)
+                .read_to_vec()
+                .context("read HTTPS upload response")?;
+            anyhow::ensure!(
+                bytes.len() <= 64 * 1024 + 17,
+                "HTTPS receiver response exceeds 64 KiB protocol limit"
+            );
+            let response = protocol::read_response_exact(bytes.as_slice())
+                .context("decode exact HTTPS upload response")?;
+            anyhow::ensure!(response.id == id, "receiver returned mismatched request id");
+            response.result.map_err(anyhow::Error::msg)
+        })();
+        add_duration(&mut timing.upload_receiver, stage.elapsed());
+        result
     }
 }
 
@@ -1424,6 +1669,23 @@ mod tests {
                 "unexpected valid target: {target:?}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_config_defaults_to_ssh_transport() {
+        let config: Config = toml::from_str("ssh_target = \"workbox\"").unwrap();
+        assert_eq!(config.transport, TransportKind::Ssh);
+    }
+
+    #[test]
+    fn invalid_https_config_does_not_fall_back_to_ssh() {
+        let config: Config = toml::from_str(&format!(
+            "transport = \"https\"\nhttps_endpoint = \"https://workbox:8443\"\nhttps_token = \"{}\"\nhttps_certificate_path = \"missing.pem\"\nssh_target = \"valid-ssh-fallback\"",
+            "ab".repeat(32)
+        ))
+        .unwrap();
+        assert_eq!(config.transport, TransportKind::Https);
+        assert!(build_transport(&config).is_err());
     }
 
     #[test]
@@ -1548,6 +1810,28 @@ mod tests {
         assert!(validate_image_layout(10, 10, Some(399)).is_err());
         assert!(validate_image_layout(0, 10, None).is_err());
         assert!(validate_image_layout(usize::MAX, 2, None).is_err());
+    }
+
+    #[test]
+    fn fast_png_encoding_is_lossless() {
+        let pixels = vec![
+            255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64, 255, 255, 255, 0,
+        ];
+        let image = ImageData {
+            width: 2,
+            height: 2,
+            bytes: Cow::Borrowed(&pixels),
+        };
+        let encoded = encode_png(&image).unwrap();
+        let decoder = png::Decoder::new(std::io::Cursor::new(encoded));
+        let mut reader = decoder.read_info().unwrap();
+        let mut decoded = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(info.width, 2);
+        assert_eq!(info.height, 2);
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(info.bit_depth, png::BitDepth::Eight);
+        assert_eq!(&decoded[..info.buffer_size()], pixels.as_slice());
     }
 
     #[test]

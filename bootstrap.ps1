@@ -3,6 +3,9 @@ param(
     [string]$Version = "latest",
     [string]$WindowsBinaryPath,
     [string]$LinuxBinaryPath,
+    [string]$HttpsHost,
+    [int]$HttpsPort = 47832,
+    [switch]$LegacySshTransport,
     [switch]$SkipChecksum,
     [switch]$ElevatedStartup,
     [switch]$NonElevatedStartup,
@@ -31,11 +34,25 @@ if ($ElevatedStartup -and $NonElevatedStartup) {
     throw "-ElevatedStartup and -NonElevatedStartup cannot be used together."
 }
 $UseElevatedStartup = [bool]$ElevatedStartup
+$UseHttpsTransport = -not [bool]$LegacySshTransport
+if ($LegacySshTransport -and (-not [string]::IsNullOrWhiteSpace($HttpsHost) -or $HttpsPort -ne 47832)) {
+    throw "-LegacySshTransport cannot be combined with -HttpsHost or a non-default -HttpsPort."
+}
+if ($UseHttpsTransport -and ($HttpsPort -lt 1 -or $HttpsPort -gt 65535)) {
+    throw "-HttpsPort must be between 1 and 65535."
+}
+if ($HttpsHost -and ($HttpsHost -notmatch '^[A-Za-z0-9._:-]+$' -or @($HttpsHost.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0)) {
+    throw "-HttpsHost must be a DNS name or IP address without shell metacharacters."
+}
 $TerminalActionId = "User.OpenCodeSSHImagePaste.AtomicPaste"
 $ImageSlotCount = 10
 $TerminalActionBegin = "// OpenCodeSSHImagePaste Action BEGIN"
 $TerminalActionEnd = "// OpenCodeSSHImagePaste Action END"
 $ExpectedCapabilities = "protocol=2;image_slots=10;response=slot-path-v1"
+$ReceiverConfigDirectory = ".config/$ProgramName"
+$ReceiverConfigFile = "$ReceiverConfigDirectory/receiver.toml"
+$ReceiverCertificateFile = "$ReceiverConfigDirectory/receiver-cert.pem"
+$ReceiverServiceFile = ".config/systemd/user/$ProgramName.service"
 $SshOptions = @(
     "-n", "-T",
     "-o", "BatchMode=yes",
@@ -69,6 +86,126 @@ function ConvertTo-TomlBasicString([string]$Value) {
     $escaped = $Value.Replace("\", "\\").Replace('"', '\"')
     $escaped = $escaped.Replace("`r", "\r").Replace("`n", "\n").Replace("`t", "\t")
     return '"' + $escaped + '"'
+}
+
+function Get-HttpsEndpoint([string]$HostName, [int]$Port) {
+    $authority = if ($HostName.Contains(":")) { "[$HostName]" } else { $HostName }
+    return "https://${authority}:$Port"
+}
+
+function Get-SystemdUserServiceText {
+    return @"
+[Unit]
+Description=OpenCode SSH Image Paste HTTPS Receiver
+After=network-online.target
+
+[Service]
+Type=simple
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.cache/opencode-ssh-image-paste
+ExecStart=%h/.local/bin/opencode-ssh-image-paste receiver --https-config %h/.config/opencode-ssh-image-paste/receiver.toml
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+"@
+}
+
+function Get-SystemdStopCommand([bool]$Disable) {
+    $operation = if ($Disable) { "disable --now" } else { "stop" }
+    return "set -eu; " +
+        "load_state=`$(systemctl --user show $ProgramName.service -p LoadState --value 2>/dev/null || true); " +
+        "if [ `"`$load_state`" != `"not-found`" ]; then systemctl --user $operation $ProgramName.service; fi; " +
+        "if systemctl --user is-active --quiet $ProgramName.service; then exit 1; fi"
+}
+
+function Test-HttpsReceiver(
+    [string]$Endpoint,
+    [string]$Token,
+    [string]$CertificatePath
+) {
+    Add-Type -AssemblyName System.Net.Http
+    if (-not ("OpenCodeSshImagePaste.Install.PinnedCertificateHttpHandler" -as [type])) {
+        $validatorSource = @'
+using System;
+using System.Net.Http;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+
+namespace OpenCodeSshImagePaste.Install
+{
+    public static class PinnedCertificateHttpHandler
+    {
+        public static HttpClientHandler Create(byte[] expectedRawData)
+        {
+            byte[] expected = (byte[])expectedRawData.Clone();
+            HttpClientHandler handler = new HttpClientHandler();
+            handler.AllowAutoRedirect = false;
+            handler.UseProxy = false;
+            handler.ServerCertificateCustomValidationCallback = delegate(
+                HttpRequestMessage request,
+                X509Certificate2 certificate,
+                X509Chain chain,
+                SslPolicyErrors errors)
+            {
+                if (certificate == null || certificate.RawData.Length != expected.Length)
+                {
+                    return false;
+                }
+
+                int difference = 0;
+                for (int index = 0; index < expected.Length; index++)
+                {
+                    difference |= certificate.RawData[index] ^ expected[index];
+                }
+                return difference == 0;
+            };
+            return handler;
+        }
+    }
+}
+'@
+        Add-Type `
+            -TypeDefinition $validatorSource `
+            -ReferencedAssemblies @([System.Net.Http.HttpClient].Assembly.Location)
+    }
+
+    $expectedCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($CertificatePath)
+    $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+    $handler = $null
+    $client = $null
+    $request = $null
+    $response = $null
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        # The certificate callback is compiled C#, not a PowerShell ScriptBlock:
+        # .NET Framework performs TLS callbacks on a thread without a Runspace.
+        $handler = [OpenCodeSshImagePaste.Install.PinnedCertificateHttpHandler]::Create($expectedCertificate.RawData)
+        $client = [System.Net.Http.HttpClient]::new($handler)
+        $client.Timeout = [TimeSpan]::FromSeconds(15)
+        $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, "$Endpoint/v1/capabilities")
+        $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new("Bearer", $Token)
+        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            throw "HTTPS capability probe returned HTTP $([int]$response.StatusCode)."
+        }
+        $capabilities = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if ($capabilities.Trim() -cne $ExpectedCapabilities) {
+            throw "HTTPS receiver has incompatible capabilities."
+        }
+    } catch {
+        throw "HTTPS capability probe failed for ${Endpoint}: $($_.Exception.ToString())"
+    } finally {
+        if ($request) { $request.Dispose() }
+        if ($response) { $response.Dispose() }
+        if ($client) { $client.Dispose() }
+        if ($handler) { $handler.Dispose() }
+        $expectedCertificate.Dispose()
+        [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+    }
 }
 
 function Get-ConfiguredSshTarget {
@@ -851,7 +988,9 @@ function Invoke-Uninstall {
     }
     $clientWasRunning = Test-InstalledClientRunning
     $clientStopped = $false
+    $terminalActionsRemoved = $false
     $startupTaskRemoved = $false
+    $remoteCleanupComplete = $true
     $startup = [Environment]::GetFolderPath("Startup")
     $shortcutPath = Join-Path $startup "OpenCode SSH Image Paste.lnk"
     $shortcutExisted = Test-Path -LiteralPath $shortcutPath
@@ -867,6 +1006,7 @@ function Invoke-Uninstall {
 
         Write-Step "Removing Windows Terminal paste action"
         Uninstall-WindowsTerminalAction -PlannedUpdates $terminalUpdates
+        $terminalActionsRemoved = $true
 
         if (Test-Path -LiteralPath $shortcutPath) {
             Remove-Item -Force -LiteralPath $shortcutPath
@@ -874,20 +1014,6 @@ function Invoke-Uninstall {
         }
         Remove-ElevatedStartupTask
         $startupTaskRemoved = $startupTaskExists
-
-        if ($target) {
-            if (Get-Command ssh.exe -ErrorAction SilentlyContinue) {
-                Write-Step "Removing Linux receiver from $target"
-                & ssh.exe @SshOptions -- $target "rm -f ~/.local/bin/$ProgramName; rm -rf ~/.cache/$ProgramName"
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Warning "Could not remove the remote receiver. Local uninstall will continue."
-                }
-            } else {
-                Write-Warning "Windows OpenSSH Client was not found. The remote receiver was not removed."
-            }
-        } else {
-            Write-Warning "No SSH target was provided or found in the configuration. The remote receiver was not removed."
-        }
 
         Write-Step "Removing Windows client"
         if (Test-Path -LiteralPath $InstallDir) {
@@ -901,10 +1027,48 @@ function Invoke-Uninstall {
         } elseif (Test-Path -LiteralPath $ConfigDir) {
             Remove-Item -Recurse -Force -LiteralPath $ConfigDir
         }
+
+        # Remote deletion is deliberately last: a local failure must not leave a
+        # restored old client depending on an already deleted receiver.
+        if ($target) {
+            if (Get-Command ssh.exe -ErrorAction SilentlyContinue) {
+                Write-Step "Removing Linux receiver from $target"
+                $remoteUninstall = (Get-SystemdStopCommand $true) + "; " +
+                    "rm -f ~/$ReceiverServiceFile; rm -rf ~/$ReceiverConfigDirectory; " +
+                    "systemctl --user daemon-reload; " +
+                    "if systemctl --user is-active --quiet $ProgramName.service; then exit 1; fi; " +
+                    "rm -f ~/.local/bin/$ProgramName; rm -rf ~/.cache/$ProgramName"
+                & ssh.exe @SshOptions -- $target $remoteUninstall
+                if ($LASTEXITCODE -ne 0) {
+                    $remoteCleanupComplete = $false
+                    Write-Warning "Remote receiver cleanup failed or could not be verified. Local uninstall completed, but remote files or service state may remain."
+                }
+            } else {
+                $remoteCleanupComplete = $false
+                Write-Warning "Windows OpenSSH Client was not found. Local uninstall completed, but the remote receiver was not removed."
+            }
+        } else {
+            $remoteCleanupComplete = $false
+            Write-Warning "No SSH target was provided or found in the configuration. Local uninstall completed, but the remote receiver was not removed."
+        }
     } catch {
         $failure = $_
         $terminalRollbackComplete = $true
         $startupRollbackComplete = $true
+        if ($terminalActionsRemoved) {
+            $terminalItems = @($terminalUpdates)
+            [array]::Reverse($terminalItems)
+            foreach ($update in $terminalItems) {
+                try {
+                    if (-not (Restore-WindowsTerminalUpdate $update)) {
+                        $terminalRollbackComplete = $false
+                    }
+                } catch {
+                    $terminalRollbackComplete = $false
+                    Write-Warning "Uninstall failed and Windows Terminal settings could not be restored: $_"
+                }
+            }
+        }
         if ($shortcutRemoved) {
             try {
                 if (Test-Path -LiteralPath $shortcutPath) {
@@ -960,7 +1124,11 @@ function Invoke-Uninstall {
     }
 
     Write-Host ""
-    Write-Host "Uninstall complete." -ForegroundColor Green
+    if ($remoteCleanupComplete) {
+        Write-Host "Uninstall complete." -ForegroundColor Green
+    } else {
+        Write-Warning "Local uninstall complete; remote cleanup is incomplete. Review the warning above and remove the remote receiver manually."
+    }
 }
 
 function Get-DownloadBase {
@@ -1042,19 +1210,37 @@ function Assert-CompatibleExistingRemoteCommand([AllowNull()][string]$ExistingCo
     }
 }
 
+function Set-TomlSetting(
+    [string]$Text,
+    [string]$Name,
+    [string]$Value
+) {
+    $setting = "$Name = $Value"
+    if ($Text -match "(?m)^\s*$([regex]::Escape($Name))\s*=") {
+        return $Text -replace "(?m)^\s*$([regex]::Escape($Name))\s*=.*$", $setting
+    }
+    return $Text.TrimEnd([char[]]@([char]13, [char]10)) + "`r`n$setting`r`n"
+}
+
 function Get-UpdatedConfigText(
     [AllowNull()][string]$ExistingConfig,
     [string]$Target,
-    [string]$RemotePasteDirectory
+    [string]$RemotePasteDirectory,
+    [bool]$UseHttps = $false,
+    [string]$HttpsEndpoint,
+    [string]$HttpsToken,
+    [string]$HttpsCertificatePath
 ) {
     Assert-CompatibleExistingRemoteCommand $ExistingConfig
     $targetSetting = "ssh_target = $(ConvertTo-TomlBasicString $Target)"
     $probeSetting = 'remote_probe_command = "~/.local/bin/opencode-ssh-image-paste receiver --capabilities"'
     $pasteDirectorySetting = "terminal_paste_directory = $(ConvertTo-TomlBasicString $RemotePasteDirectory)"
+    $transportSetting = if ($UseHttps) { 'transport = "https"' } else { 'transport = "ssh"' }
 
     # PowerShell coerces $null passed to a [string] parameter into "".
     if ([string]::IsNullOrEmpty($ExistingConfig)) {
         return @"
+$transportSetting
 $targetSetting
 ssh_program = "ssh.exe"
 ssh_arguments = []
@@ -1063,6 +1249,7 @@ $probeSetting
 $pasteDirectorySetting
 terminal_window_class = "CASCADIA_HOSTING_WINDOW_CLASS"
 request_timeout_seconds = 15
+$(if ($UseHttps) { "https_endpoint = $(ConvertTo-TomlBasicString $HttpsEndpoint)`r`nhttps_token = $(ConvertTo-TomlBasicString $HttpsToken)`r`nhttps_certificate_path = $(ConvertTo-TomlBasicString $HttpsCertificatePath)" })
 "@
     }
 
@@ -1078,12 +1265,19 @@ request_timeout_seconds = 15
         $updated = $updated.TrimEnd([char[]]@([char]13, [char]10)) + "`r`n$probeSetting`r`n"
     }
 
+    $transportValue = if ($UseHttps) { '"https"' } else { '"ssh"' }
+    $updated = Set-TomlSetting $updated "transport" $transportValue
     if ($updated -match '(?m)^\s*terminal_paste_directory\s*=') {
         $updated = $updated -replace '(?m)^\s*terminal_paste_directory\s*=.*$', $pasteDirectorySetting
     } elseif ($updated -match '(?m)^\s*terminal_paste_path\s*=') {
         $updated = $updated -replace '(?m)^\s*terminal_paste_path\s*=.*$', $pasteDirectorySetting
     } else {
         $updated = $updated.TrimEnd([char[]]@([char]13, [char]10)) + "`r`n$pasteDirectorySetting`r`n"
+    }
+    if ($UseHttps) {
+        $updated = Set-TomlSetting $updated "https_endpoint" (ConvertTo-TomlBasicString $HttpsEndpoint)
+        $updated = Set-TomlSetting $updated "https_token" (ConvertTo-TomlBasicString $HttpsToken)
+        $updated = Set-TomlSetting $updated "https_certificate_path" (ConvertTo-TomlBasicString $HttpsCertificatePath)
     }
     return $updated
 }
@@ -1140,6 +1334,14 @@ if (-not $SshTarget) {
 if ([string]::IsNullOrWhiteSpace($SshTarget) -or $SshTarget.StartsWith("-")) {
     throw "A valid SSH host or alias is required."
 }
+if ($UseHttpsTransport -and [string]::IsNullOrWhiteSpace($HttpsHost)) {
+    $HttpsHost = Read-Host "Fixed LAN host name or IP for the HTTPS receiver"
+}
+if ($UseHttpsTransport -and ([string]::IsNullOrWhiteSpace($HttpsHost) -or
+    $HttpsHost -notmatch '^[A-Za-z0-9._:-]+$' -or
+    @($HttpsHost.ToCharArray() | Where-Object { [char]::IsControl($_) }).Count -gt 0)) {
+    throw "A valid fixed LAN HTTPS host name or IP address is required."
+}
 
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("opencode-ssh-image-paste-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
@@ -1147,13 +1349,19 @@ New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 $operationId = [guid]::NewGuid().ToString("N")
 $remoteTemporary = ".local/bin/$ProgramName.download.$operationId"
 $remoteRollback = ".local/bin/$ProgramName.rollback.$operationId"
+$remoteHttpsRollback = ".config/$ProgramName.rollback.$operationId"
 $remoteActivated = $false
+$remoteHttpsStateCaptured = $false
 $remoteHadExisting = $false
 $localActivated = $false
 $localCandidate = $null
 $localRollback = Join-Path $InstallDir ".$ProgramName.$operationId.rollback.exe"
 $retainLocalRollback = $false
 $configCommitted = $false
+$certificateCommitted = $false
+$clientCertificatePath = Join-Path $ConfigDir "receiver-cert.pem"
+$certificateExisted = Test-Path -LiteralPath $clientCertificatePath
+$existingCertificateText = if ($certificateExisted) { [IO.File]::ReadAllText($clientCertificatePath) } else { $null }
 $shortcutCommitted = $false
 $launcherCommitted = $false
 $startupTaskCommitted = $false
@@ -1165,6 +1373,17 @@ try {
     & ssh.exe @SshOptions -- $SshTarget "echo ready"
     if ($LASTEXITCODE -ne 0) {
         throw "SSH connection failed. Configure a host key and non-interactive key or ssh-agent authentication first."
+    }
+
+    if ($UseHttpsTransport) {
+        Write-Step "Checking systemd user service and linger"
+        $systemdState = ((& ssh.exe @SshOptions -- $SshTarget "systemctl --user show-environment >/dev/null 2>&1 && loginctl show-user `"`$USER`" -p Linger --value") -join "`n").Trim()
+        if ($LASTEXITCODE -ne 0) {
+            throw "systemctl --user is unavailable for the remote user. HTTPS mode requires a systemd user manager."
+        }
+        if ($systemdState -cne "yes") {
+            throw "Remote user linger is not enabled. Run 'loginctl enable-linger USER' as an administrator before HTTPS installation."
+        }
     }
 
     $remoteArchitecture = ((& ssh.exe @SshOptions -- $SshTarget "uname -m") -join "`n").Trim()
@@ -1231,10 +1450,7 @@ try {
 
     $configExisted = Test-Path -LiteralPath $ConfigPath
     $existingConfig = if ($configExisted) { [IO.File]::ReadAllText($ConfigPath) } else { $null }
-    $updatedConfig = Get-UpdatedConfigText `
-        -ExistingConfig $existingConfig `
-        -Target $SshTarget `
-        -RemotePasteDirectory $remotePasteDirectory
+    $updatedConfig = $null
     $launcherExisted = Test-Path -LiteralPath $LauncherPath
     $existingLauncher = if ($launcherExisted) { [IO.File]::ReadAllText($LauncherPath) } else { $null }
     $updatedLauncher = Get-ClientLauncherText
@@ -1284,10 +1500,19 @@ try {
         throw "Could not stop the previous Windows client. Close it in Task Manager, then rerun bootstrap.ps1."
     }
 
-    Write-Step "Configuring 10 atomic Windows Terminal paste actions"
-    foreach ($update in $terminalUpdates) {
-        [void]$appliedTerminalUpdates.Add($update)
-        Apply-WindowsTerminalUpdate $update
+    if ($UseHttpsTransport) {
+        Write-Step "Capturing Linux receiver service state"
+        $captureRemoteState = "set -eu; rm -rf ~/$remoteHttpsRollback; mkdir -p -m 700 ~/$remoteHttpsRollback; " +
+            "if [ -d ~/$ReceiverConfigDirectory ]; then cp -a ~/$ReceiverConfigDirectory ~/$remoteHttpsRollback/config; touch ~/$remoteHttpsRollback/config-existed; fi; " +
+            "if [ -f ~/$ReceiverServiceFile ]; then cp -a ~/$ReceiverServiceFile ~/$remoteHttpsRollback/service; touch ~/$remoteHttpsRollback/unit-existed; fi; " +
+            "active_status=0; systemctl --user is-active --quiet $ProgramName.service || active_status=`$?; " +
+            "case `"`$active_status`" in 0) touch ~/$remoteHttpsRollback/was-active ;; 3|4) ;; *) exit 1 ;; esac; " +
+            "enabled_status=0; enabled_state=`$(systemctl --user is-enabled $ProgramName.service 2>/dev/null) || enabled_status=`$?; " +
+            "case `"`$enabled_state`" in enabled|enabled-runtime) touch ~/$remoteHttpsRollback/was-enabled ;; disabled|static|indirect|masked|not-found|generated|transient) ;; *) exit 1 ;; esac; " +
+            "touch ~/$remoteHttpsRollback/state-captured; test -f ~/$remoteHttpsRollback/state-captured"
+        & ssh.exe @SshOptions -- $SshTarget $captureRemoteState
+        if ($LASTEXITCODE -ne 0) { throw "Could not capture the existing HTTPS receiver service state." }
+        $remoteHttpsStateCaptured = $true
     }
 
     Write-Step "Activating Linux receiver ($remoteArchitecture)"
@@ -1307,8 +1532,75 @@ try {
         throw "The activated Linux receiver failed its capability check."
     }
 
+    $httpsEndpoint = $null
+    $httpsToken = $null
+    $downloadedCertificate = Join-Path $TempDir "receiver-cert.pem"
+    if ($UseHttpsTransport) {
+        Write-Step "Initializing HTTPS receiver"
+        & ssh.exe @SshOptions -- $SshTarget (Get-SystemdStopCommand $false)
+        if ($LASTEXITCODE -ne 0) { throw "Could not stop and verify the previous HTTPS receiver service." }
+        $initializeHttps = "mkdir -p -m 700 ~/$ReceiverConfigDirectory; " +
+            "~/.local/bin/$ProgramName receiver --init-https-config ~/$ReceiverConfigFile --host $HttpsHost --port $HttpsPort"
+        & ssh.exe @SshOptions -- $SshTarget $initializeHttps
+        if ($LASTEXITCODE -ne 0) { throw "Could not initialize the HTTPS receiver configuration." }
+
+        $serviceText = Get-SystemdUserServiceText
+        $serviceBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($serviceText))
+        $installService = "set -eu; mkdir -p ~/.config/systemd/user; " +
+            "printf %s $serviceBase64 | base64 -d > ~/$ReceiverServiceFile.new; chmod 600 ~/$ReceiverServiceFile.new; mv -f ~/$ReceiverServiceFile.new ~/$ReceiverServiceFile; " +
+            "systemctl --user daemon-reload; systemctl --user enable --now $ProgramName.service; " +
+            "systemctl --user is-enabled --quiet $ProgramName.service; systemctl --user is-active --quiet $ProgramName.service"
+        & ssh.exe @SshOptions -- $SshTarget $installService
+        if ($LASTEXITCODE -ne 0) { throw "Could not install or start the systemd user HTTPS receiver service." }
+
+        $downloadedReceiverConfig = Join-Path $TempDir "receiver.toml"
+        & scp.exe @ScpOptions -- "${SshTarget}:$ReceiverConfigFile" $downloadedReceiverConfig
+        if ($LASTEXITCODE -ne 0) { throw "Could not download the generated HTTPS receiver configuration." }
+        & scp.exe @ScpOptions -- "${SshTarget}:$ReceiverCertificateFile" $downloadedCertificate
+        if ($LASTEXITCODE -ne 0) { throw "Could not download the HTTPS receiver certificate." }
+        $updatedCertificateText = [IO.File]::ReadAllText($downloadedCertificate)
+        $receiverConfigText = [IO.File]::ReadAllText($downloadedReceiverConfig)
+        $tokenMatch = [regex]::Match($receiverConfigText, '(?m)^token\s*=\s*"([0-9a-fA-F]{64})"\s*$')
+        if (-not $tokenMatch.Success) { throw "Generated HTTPS receiver token is missing or invalid." }
+        $httpsToken = $tokenMatch.Groups[1].Value
+        $httpsEndpoint = Get-HttpsEndpoint $HttpsHost $HttpsPort
+        Test-HttpsReceiver $httpsEndpoint $httpsToken $downloadedCertificate
+    } else {
+        Write-Step "Selecting explicit legacy SSH receiver mode"
+        $stopOptionalHttpsService = "if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then " +
+            (Get-SystemdStopCommand $true) + "; fi"
+        & ssh.exe @SshOptions -- $SshTarget $stopOptionalHttpsService
+        if ($LASTEXITCODE -ne 0) { throw "Could not disable, stop, and verify the HTTPS receiver before selecting SSH mode." }
+    }
+
+    # Delay the Terminal write until the remote transport has passed its live
+    # probe. This keeps TLS, authentication, and service-start failures entirely
+    # inside the remote rollback path and avoids a Terminal rewrite race.
+    Write-Step "Configuring 10 atomic Windows Terminal paste actions"
+    foreach ($update in $terminalUpdates) {
+        [void]$appliedTerminalUpdates.Add($update)
+        Apply-WindowsTerminalUpdate $update
+    }
+
+    $updatedConfig = Get-UpdatedConfigText `
+        -ExistingConfig $existingConfig `
+        -Target $SshTarget `
+        -RemotePasteDirectory $remotePasteDirectory `
+        -UseHttps $UseHttpsTransport `
+        -HttpsEndpoint $httpsEndpoint `
+        -HttpsToken $httpsToken `
+        -HttpsCertificatePath $clientCertificatePath
+
     Write-Step "Installing Windows client"
     New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
+    if ($UseHttpsTransport) {
+        $certificateCommitted = $true
+        Set-TextFileAtomically `
+            -Path $clientCertificatePath `
+            -ExpectedExists $certificateExisted `
+            -ExpectedText $existingCertificateText `
+            -NewText $updatedCertificateText
+    }
     $localCandidate = Join-Path $InstallDir ".$ProgramName.$operationId.new.exe"
     Copy-Item -Force -LiteralPath $windowsDownload -Destination $localCandidate
     $installedCandidateInformation = Get-LocalBinaryInformation $localCandidate
@@ -1377,7 +1669,7 @@ try {
     Write-Host "Installation complete. Copy an image, focus Windows Terminal, and press Ctrl+V." -ForegroundColor Green
     Write-Host "Config: $ConfigPath"
     Remove-Item -Force -LiteralPath $localRollback -ErrorAction SilentlyContinue
-    & ssh.exe @SshOptions -- $SshTarget "rm -f ~/$remoteRollback" | Out-Null
+    & ssh.exe @SshOptions -- $SshTarget "rm -f ~/$remoteRollback; rm -rf ~/$remoteHttpsRollback" | Out-Null
 } catch {
     $failure = $_
     if ($commitStarted) {
@@ -1485,6 +1777,32 @@ try {
             }
         }
 
+        if ($certificateCommitted) {
+            try {
+                if ($certificateExisted) {
+                    $currentCertificate = [IO.File]::ReadAllText($clientCertificatePath)
+                    if ($currentCertificate -ceq $updatedCertificateText) {
+                        Set-TextFileAtomically $clientCertificatePath $true $currentCertificate $existingCertificateText
+                    } elseif ($currentCertificate -ceq $existingCertificateText) {
+                        # The atomic update failed before replacing the original.
+                    } else {
+                        throw "HTTPS certificate changed after installation; refusing to overwrite it."
+                    }
+                } else {
+                    if (Test-Path -LiteralPath $clientCertificatePath) {
+                        $currentCertificate = [IO.File]::ReadAllText($clientCertificatePath)
+                        if ($currentCertificate -cne $updatedCertificateText) {
+                            throw "HTTPS certificate changed after installation; refusing to remove it."
+                        }
+                        Remove-Item -Force -LiteralPath $clientCertificatePath
+                    }
+                }
+            } catch {
+                $rollbackComplete = $false
+                Write-Warning "Could not restore the HTTPS receiver certificate: $_"
+            }
+        }
+
         if ($localActivated) {
             try {
                 if ($binaryExisted -and (Test-Path -LiteralPath $localRollback)) {
@@ -1531,22 +1849,45 @@ try {
         }
 
         if ($remoteActivated) {
-            $restoreRemote = if ($remoteHadExisting) {
-                "if [ -e ~/$remoteRollback ]; then mv -f ~/$remoteRollback ~/.local/bin/$ProgramName; else exit 1; fi"
+            $restoreBinary = if ($remoteHadExisting) {
+                "test -e ~/$remoteRollback; mv -f ~/$remoteRollback ~/.local/bin/$ProgramName; "
             } else {
-                "rm -f ~/.local/bin/$ProgramName"
+                "rm -f ~/.local/bin/$ProgramName; "
             }
-            try {
-                & ssh.exe @SshOptions -- $SshTarget $restoreRemote | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    throw "ssh.exe exited with code $LASTEXITCODE"
-                }
-            } catch {
+            if ($UseHttpsTransport -and $remoteHttpsStateCaptured) {
+                $restoreRemote = "set -eu; test -f ~/$remoteHttpsRollback/state-captured; " +
+                    (Get-SystemdStopCommand $false) + "; " +
+                    $restoreBinary +
+                    "rm -rf ~/$ReceiverConfigDirectory; rm -f ~/$ReceiverServiceFile; " +
+                    "if [ -f ~/$remoteHttpsRollback/config-existed ]; then cp -a ~/$remoteHttpsRollback/config ~/$ReceiverConfigDirectory; fi; " +
+                    "if [ -f ~/$remoteHttpsRollback/unit-existed ]; then cp -a ~/$remoteHttpsRollback/service ~/$ReceiverServiceFile; fi; " +
+                    "systemctl --user daemon-reload; " +
+                    "if [ -f ~/$remoteHttpsRollback/was-enabled ]; then " +
+                    "systemctl --user enable $ProgramName.service; systemctl --user is-enabled --quiet $ProgramName.service; " +
+                    "else " + (Get-SystemdStopCommand $true) + "; if systemctl --user is-enabled --quiet $ProgramName.service; then exit 1; fi; fi; " +
+                    "if [ -f ~/$remoteHttpsRollback/was-active ]; then " +
+                    "systemctl --user start $ProgramName.service; systemctl --user is-active --quiet $ProgramName.service; " +
+                    "elif systemctl --user is-active --quiet $ProgramName.service; then exit 1; fi"
+            } elseif ($UseHttpsTransport) {
+                $restoreRemote = $null
                 $rollbackComplete = $false
-                if ($remoteHadExisting) {
-                    Write-Warning "Could not restore the previous Linux receiver: $_ Inspect retained rollback path: ~/$remoteRollback"
-                } else {
-                    Write-Warning "Could not remove the newly activated Linux receiver: $_"
+                Write-Warning "The Linux receiver was activated without a verified service-state snapshot; remote rollback was blocked."
+            } else {
+                $restoreRemote = "set -eu; $restoreBinary"
+            }
+            if ($restoreRemote) {
+                try {
+                    & ssh.exe @SshOptions -- $SshTarget $restoreRemote | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "ssh.exe exited with code $LASTEXITCODE"
+                    }
+                } catch {
+                    $rollbackComplete = $false
+                    if ($remoteHadExisting) {
+                        Write-Warning "Could not restore the previous Linux receiver: $_ Inspect retained rollback path: ~/$remoteRollback"
+                    } else {
+                        Write-Warning "Could not remove the newly activated Linux receiver: $_"
+                    }
                 }
             }
         }

@@ -22,6 +22,13 @@ try {
     . (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode
 
     Assert-True (-not $UseElevatedStartup) "Default installation did not select normal startup."
+    Assert-True $UseHttpsTransport "Default installation did not select HTTPS transport."
+    Assert-True ($HttpsPort -eq 47832) "Default HTTPS port was not 47832."
+    $legacyMode = & {
+        . (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode -LegacySshTransport
+        return -not $UseHttpsTransport
+    }
+    Assert-True $legacyMode "-LegacySshTransport did not explicitly select SSH transport."
     $explicitElevated = & {
         . (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode -ElevatedStartup
         return $UseElevatedStartup
@@ -41,8 +48,64 @@ try {
         -ExistingConfig $null `
         -Target "test-workbox" `
         -RemotePasteDirectory "/home/test/.cache/opencode-ssh-image-paste"
+    Assert-True ($freshConfig -match '(?m)^transport = "ssh"\r?$') "Fresh legacy install did not select explicit SSH transport."
     Assert-True ($freshConfig -match '(?m)^ssh_target = "test-workbox"\r?$') "Fresh install did not create ssh_target."
     Assert-True ($freshConfig -match '(?m)^terminal_paste_directory = "/home/test/.cache/opencode-ssh-image-paste"\r?$') "Fresh install did not create terminal_paste_directory."
+
+    $httpsConfig = Get-UpdatedConfigText `
+        -ExistingConfig $freshConfig `
+        -Target "test-workbox" `
+        -RemotePasteDirectory "/home/test/.cache/opencode-ssh-image-paste" `
+        -UseHttps $true `
+        -HttpsEndpoint "https://10.0.0.8:47832" `
+        -HttpsToken ("ab" * 32) `
+        -HttpsCertificatePath "C:\fixture\receiver-cert.pem"
+    Assert-True ($httpsConfig -match '(?m)^transport = "https"\r?$') "HTTPS migration did not select HTTPS transport."
+    Assert-True ($httpsConfig -match '(?m)^https_endpoint = "https://10.0.0.8:47832"\r?$') "HTTPS migration omitted its endpoint."
+    Assert-True ($httpsConfig -match '(?m)^https_token = "[0-9a-f]{64}"\r?$') "HTTPS migration omitted its generated token."
+    Assert-True ($httpsConfig -match '(?m)^https_certificate_path = "C:\\\\fixture\\\\receiver-cert.pem"\r?$') "HTTPS migration omitted its dedicated certificate."
+    Assert-True ([regex]::Matches($httpsConfig, '(?m)^transport\s*=').Count -eq 1) "Repeated migration duplicated transport settings."
+    Assert-True ((Get-HttpsEndpoint "2001:db8::8" 47832) -ceq "https://[2001:db8::8]:47832") "IPv6 HTTPS endpoint did not use brackets."
+
+    $serviceText = Get-SystemdUserServiceText
+    Assert-True ($serviceText -match 'ExecStart=%h/.local/bin/opencode-ssh-image-paste receiver --https-config %h/.config/opencode-ssh-image-paste/receiver.toml') "systemd user service does not use the HTTPS receiver config."
+    Assert-True ($serviceText -match '(?m)^Restart=on-failure\r?$') "systemd user service does not restart failed receivers."
+    foreach ($hardening in @('UMask=0077', 'NoNewPrivileges=true', 'PrivateTmp=true', 'ProtectSystem=strict', 'ReadWritePaths=%h/.cache/opencode-ssh-image-paste')) {
+        Assert-True ($serviceText -match "(?m)^$([regex]::Escape($hardening))\r?$") "systemd service omitted hardening: $hardening"
+    }
+    Assert-True ($serviceText -notmatch '(?i)token|bearer') "systemd service leaks HTTPS credentials."
+
+    $stopCommand = Get-SystemdStopCommand $false
+    $disableCommand = Get-SystemdStopCommand $true
+    Assert-True ($stopCommand -match 'LoadState') "systemd stop does not distinguish a missing unit from an operation failure."
+    Assert-True ($disableCommand -match 'disable --now') "systemd fallback/uninstall command does not disable and stop the service."
+    Assert-True ($disableCommand -match 'is-active --quiet') "systemd fallback/uninstall command does not verify the service is inactive."
+    Assert-True ($disableCommand -notmatch '\|\| true') "systemd fallback/uninstall command unconditionally swallows failures."
+
+    $bootstrapText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\bootstrap.ps1"))
+    Assert-True ($bootstrapText -match 'cp -a ~\/\$ReceiverConfigDirectory ~\/\$remoteHttpsRollback/config; touch ~\/\$remoteHttpsRollback/config-existed') "Remote config snapshot marks success before copy completion."
+    Assert-True ($bootstrapText -match 'if \(\$UseHttpsTransport -and \$remoteHttpsStateCaptured\)') "HTTPS rollback is not gated by a verified service-state snapshot."
+    Assert-True ($bootstrapText -match 'else \{\s*\$restoreRemote = "set -eu; \$restoreBinary"') "Legacy SSH rollback still requires a systemd service-state snapshot."
+    Assert-True ($bootstrapText -match 'Add-Type -AssemblyName System\.Net\.Http') "Windows PowerShell HTTPS probe does not load System.Net.Http."
+    Assert-True ($bootstrapText -match 'PinnedCertificateHttpHandler\]::Create\(\$expectedCertificate\.RawData\)') "HTTPS probe does not create its runspace-independent certificate handler."
+    Assert-True ($bootstrapText -match 'ServerCertificateCustomValidationCallback = delegate') "Certificate validation still depends on a PowerShell ScriptBlock callback."
+    Assert-True ($bootstrapText -match 'difference \|= certificate\.RawData\[index\] \^ expected\[index\]') "Pinned certificate handler does not compare the complete certificate bytes."
+    Assert-True ($bootstrapText -match 'SecurityProtocol = \$previousSecurityProtocol -bor \[Net\.SecurityProtocolType\]::Tls12') "Windows PowerShell HTTPS probe does not enable TLS 1.2."
+    Assert-True ($bootstrapText -match 'handler\.UseProxy = false;') "Direct LAN HTTPS probe still inherits the Windows proxy."
+    Assert-True ($bootstrapText -match 'SecurityProtocol = \$previousSecurityProtocol\s*\r?\n') "HTTPS probe does not restore the process-wide TLS setting."
+    Assert-True ($bootstrapText -match 'elseif \(\$currentCertificate -ceq \$existingCertificateText\)') "Certificate rollback does not accept an already-restored original file."
+    Assert-True ($bootstrapText -match '\[array\]::Reverse\(\$terminalItems\)') "Terminal rollback does not restore modifications in reverse order."
+    $localRemoval = $bootstrapText.IndexOf('Write-Step "Removing Windows client"', [StringComparison]::Ordinal)
+    $remoteRemoval = $bootstrapText.IndexOf('Write-Step "Removing Linux receiver from $target"', [StringComparison]::Ordinal)
+    Assert-True ($localRemoval -ge 0 -and $remoteRemoval -gt $localRemoval) "Uninstall deletes the remote receiver before local removal succeeds."
+    $httpsProbe = $bootstrapText.IndexOf('Test-HttpsReceiver $httpsEndpoint $httpsToken $downloadedCertificate', [StringComparison]::Ordinal)
+    $terminalCommit = $bootstrapText.IndexOf('Write-Step "Configuring 10 atomic Windows Terminal paste actions"', [StringComparison]::Ordinal)
+    Assert-True ($httpsProbe -ge 0 -and $terminalCommit -gt $httpsProbe) "Terminal actions are committed before the HTTPS receiver passes its live probe."
+
+    $wrapperText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\install-windows.ps1"))
+    foreach ($forwarded in @('HttpsHost', 'HttpsPort', 'LegacySshTransport')) {
+        Assert-True ($wrapperText -match "-$forwarded") "install-windows.ps1 does not forward -$forwarded."
+    }
 
     # Login startup must go through the GUI-subsystem Windows Script Host. A
     # shortcut that directly targets the console client briefly opens a window

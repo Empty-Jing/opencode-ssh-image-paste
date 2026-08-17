@@ -114,6 +114,19 @@ pub fn read_response(mut reader: impl Read) -> io::Result<Response> {
     })
 }
 
+#[cfg(any(windows, test))]
+pub fn read_response_exact(mut reader: impl Read) -> io::Result<Response> {
+    let response = read_response(&mut reader)?;
+    let mut trailing = [0_u8; 1];
+    if reader.read(&mut trailing)? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "response frame has trailing bytes",
+        ));
+    }
+    Ok(response)
+}
+
 fn read_u32(reader: &mut impl Read) -> io::Result<u32> {
     let mut bytes = [0; 4];
     reader.read_exact(&mut bytes)?;
@@ -189,8 +202,23 @@ mod tests {
         ] {
             let mut bytes = Vec::new();
             write_response(&mut bytes, &response).unwrap();
-            assert_eq!(read_response(bytes.as_slice()).unwrap(), response);
+            assert_eq!(read_response_exact(bytes.as_slice()).unwrap(), response);
         }
+    }
+
+    #[test]
+    fn https_upload_ocr2_response_rejects_trailing_bytes() {
+        let response = Response {
+            id: 9,
+            result: Ok("/tmp/image.png".into()),
+        };
+        let mut bytes = Vec::new();
+        write_response(&mut bytes, &response).unwrap();
+        bytes.push(0);
+        assert_eq!(
+            read_response_exact(bytes.as_slice()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

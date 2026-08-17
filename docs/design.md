@@ -12,7 +12,7 @@
 
 - 文本剪贴板继续由 Windows Terminal 处理，`Ctrl+V` 行为不变；
 - 图片剪贴板使用同一个 `Ctrl+V`；
-- 图片通过常驻 SSH 通道传到 Linux，不为每次粘贴启动 PowerShell、SCP 或新 SSH；
+- 图片默认通过长期复用 Agent 的内网 HTTPS 传到 Linux；SSH 仅用于部署、诊断和显式回退，HTTPS 失败不自动降级；
 - Linux 原子更新 10 个私有图片槽位中的下一个槽位，Windows 触发对应的 Terminal `sendInput` Action，一次性发送 bracketed paste，OpenCode 将该路径转成图片附件；
 - 用户在上传期间切换窗口、Tab、pane、输入按键、点击鼠标或复制新内容时，自动粘贴必须取消。
 
@@ -33,8 +33,8 @@ flowchart LR
     Kind -->|文本或非目标窗口| Pass[放行原始按键]
     Kind -->|PNG / DIBV5 / DIB / Bitmap 图片| Queue[有界工作队列]
     Queue --> Encode[内存编码 PNG]
-    Encode --> SSH[常驻 OpenSSH 子进程]
-    SSH --> Receiver[Linux receiver]
+    Encode --> HTTPS[长期复用 HTTPS Agent]
+    HTTPS -->|Bearer Token + 专用信任根| Receiver[systemd 用户级 Linux receiver]
     Receiver --> Store[原子更新 10 个私有图片槽位]
     Store --> Path[返回绝对路径]
     Path --> Guard[焦点/输入/剪贴板复核]
@@ -48,9 +48,17 @@ flowchart LR
 项目发布一个二进制，按子命令承担两种角色：
 
 | 模式 | 平台 | 职责 |
-|---|---|---|
+| --- | --- | --- |
 | `client` | Windows | 监听图片粘贴、编码 PNG、维护 SSH、保护焦点与剪贴板、触发 Terminal Action |
-| `receiver` | Linux | 读取帧、校验边界、原子更新固定私有图片、返回路径、清理旧文件 |
+| `receiver` | Linux | 从 stdio 或 HTTPS 读取帧、校验边界、原子更新固定私有图片、返回路径、清理旧文件 |
+
+### 4.1 HTTPS 部署边界
+
+Windows `ImageTransport` seam 提供 `HttpsTransport` 与保留的 `SshTransport`。缺少 `transport` 的旧配置默认 SSH；bootstrap 只有在 HTTPS 服务启动并通过能力探测后才写入 HTTPS。`HttpsTransport` 在进程生命周期内持有一个 `ureq::Agent`，禁用重定向并仅信任 bootstrap 安装的自签名证书，不会在任何 HTTPS 错误后实例化 SSH Adapter。
+
+Linux `ReceiverState` 集中持有目录锁、槽位状态和原子存储逻辑，stdio 与 HTTPS Receiver 复用该状态。目录锁保证两种 Receiver 不能同时占用同一目录。HTTPS Receiver 使用 `tiny_http` 的 rustls 后端，提供均需严格 Bearer Token 的 `GET /v1/capabilities` 和 `POST /v1/upload`。上传只接受 `application/octet-stream`，HTTP body 最大为 OCB2 头加 16 MiB PNG；业务结果继续用 OCR2，响应消息仍限制为 64 KiB。
+
+bootstrap 通过 SSH 生成 SAN 覆盖显式 `-HttpsHost` 的自签名证书和 32 随机字节 Token，安装用户级 systemd unit，并要求 `systemctl --user` 可用及 `Linger=yes`。配置目录为 `0700`，Receiver 配置、证书、私钥和 unit 为 `0600`。Token 只通过 SSH 文件传输进入 Windows 用户配置，不进入 URL、日志或进程命令行。安装器不修改防火墙。
 
 ## 5. 模块设计
 
@@ -64,7 +72,7 @@ Windows client 启动时先获取当前用户会话内的命名 Mutex，重复�
 
 1. 低级键盘和鼠标钩子只做快速判断、活动计数和入队，不执行阻塞工作。
 2. 单工作线程读取剪贴板、编码 PNG，并串行处理上传，避免多个请求争抢剪贴板。
-3. `Transport` 维护一个 OpenSSH 子进程，通过 stdin/stdout 复用连接，并通过 watchdog 处理阻塞。
+3. `ImageTransport` 选择长期复用连接池的 `HttpsTransport` 或显式配置的 `SshTransport`；前者严格验证专用证书且禁用重定向，后者保留 stdin/stdout 与 watchdog 行为。
 4. 前台窗口、剪贴板序号和用户活动代次共同防止错误注入；上传成功后根据 receiver 返回的槽位，通过对应的私有 `Ctrl+Alt+Shift+F13` 到 `F22` 组合键触发 Windows Terminal Action。
 
 ### 5.3 `protocol.rs`
@@ -73,7 +81,7 @@ Windows client 启动时先获取当前用户会话内的命名 Mutex，重复�
 
 ### 5.4 `receiver.rs`
 
-Receiver 在同一 SSH 进程中循环处理请求，并在进程生命周期内持有图片目录的独占文件锁，避免重复 client 或重叠 SSH 连接分配到同一槽位。每次请求只携带当前粘贴的一张图片。目录创建后设置为 `0700`；最多维护 10 个 `image-00.png` 到 `image-09.png` 槽位，每次先通过 `create_new` 写入 `0600` 临时文件，再用同目录原子 rename 替换当前槽位，保证 OpenCode 不会读取半张图片。写入失败会立即清理临时文件；managed slot 若不是普通文件则拒绝启动。第 11 次成功粘贴开始循环覆盖最旧槽位；旧 50 槽布局中退出使用的 `image-10.png` 到 `image-49.png` 会在超过 24 小时后由周期清理移除，避免升级时立即删除仍可能被引用的图片。清理任务还会删除旧版 `clipboard-*.png` 和遗留临时文件。
+Receiver 的可复用 `ReceiverState` 在进程生命周期内持有图片目录的独占文件锁，stdio 与 HTTPS 服务都通过它处理请求，避免重复 client 或不同入口分配到同一槽位。每次请求只携带当前粘贴的一张图片。目录创建后设置为 `0700`；最多维护 10 个 `image-00.png` 到 `image-09.png` 槽位，每次先通过 `create_new` 写入 `0600` 临时文件，再用同目录原子 rename 替换当前槽位，保证 OpenCode 不会读取半张图片。写入失败会立即清理临时文件；managed slot 若不是普通文件则拒绝启动。第 11 次成功粘贴开始循环覆盖最旧槽位；旧 50 槽布局中退出使用的 `image-10.png` 到 `image-49.png` 会在超过 24 小时后由周期清理移除，避免升级时立即删除仍可能被引用的图片。清理任务还会删除旧版 `clipboard-*.png` 和遗留临时文件。
 
 ## 6. 关键流程
 
@@ -187,7 +195,11 @@ N bytes  UTF-8 path or error
 
 输出端不清空、替换或恢复 Windows 剪贴板。`bootstrap.ps1` 查询 Receiver 的绝对图片目录，并向用户的 Windows Terminal `settings.json` 添加 10 个隐藏的 `sendInput` 槽位 Action。每个 Action 持有完整的 `ESC [ 200 ~ + image-NN.png + ESC [ 201 ~`，由 Windows Terminal 一次性写入 PTY，避免逐字符 `SendInput` 被 TUI 的按键解析器拆分并留下可见 `0~`。Client 根据 Receiver 返回的槽位只模拟对应内部组合键；普通文本 `Ctrl+V` 配置不变。`doctor` 同时检查全部 10 个 Action ID 与路径，升级和卸载只替换或删除项目自己的标记块。该方案要求 client 与目标 Terminal 处于相同完整性级别。
 
-## 10. SSH 生命周期
+## 10. 传输生命周期
+
+HTTPS 是正常热路径。Client 在进程生命周期内复用同一 `ureq::Agent`，连接池空闲年龄上限显式设为 30 分钟；日志以 `transport=https` 和 `transport_state=agent_new|agent_reused` 记录可观测的 Agent 层状态，不推断底层 Socket 是否命中连接池。TLS、认证、HTTP 或协议错误直接结束当前请求，不进入 SSH。Fast PNG 编码使用 `png::Compression::Fast`，只改变无损编码策略，不改变 RGBA 像素。
+
+### 10.1 显式 SSH 回退生命周期
 
 ```mermaid
 flowchart TD
@@ -208,7 +220,7 @@ flowchart TD
 ## 11. 威胁模型
 
 | 风险 | 控制措施 |
-|---|---|
+| --- | --- |
 | 恶意或损坏的长度字段 | 分配前校验 16 MiB/64 KiB 上限 |
 | 超大或损坏的剪贴板图片 | client 校验解码结果的边长、像素数和 RGBA 大小；标准解码器仍可能在校验前分配，残余风险为 client 内存耗尽 |
 | 非图片 payload | Receiver 校验 PNG 签名 |
@@ -231,6 +243,7 @@ flowchart TD
 - 安装器需要修改 Windows Terminal `settings.json`；首次运行 Terminal 前没有该文件时，bootstrap 会要求先打开一次 Terminal。
 - Linux receiver 已自动化测试；真实 Windows 输入、剪贴板和 Windows Terminal 行为仍需在发布前执行手工兼容性矩阵。
 - Watchdog 通过 Win32 `TerminateProcess` 尽力中止超时 SSH；操作系统拒绝进程访问时无法形成严格超时保证。
+- `tiny_http` HTTPS Receiver 保持同步内网服务模型，目前没有强制连接级慢客户端超时或硬并发连接上限；它不是公网服务，即使有 TLS 和 Bearer Token 也不得直接暴露到公网。
 - 最多 10 个图片槽位会保留到后续循环覆盖或卸载；第 11 次成功粘贴覆盖最旧槽位，旧版随机图片和遗留临时文件超过 24 小时后清理。
 
 ## 13. 验证策略
