@@ -18,6 +18,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Encode clipboard RGBA images with lossless `png::Compression::Fast` and use HTTPS as the bootstrap-selected hot path only after a successful authenticated capability probe.
 - Keep missing `transport` configurations on SSH and never automatically downgrade an HTTPS failure to SSH.
 
+### Fixed
+
+- Emit the path-separating space after the bracketed-paste terminator so OpenCode refreshes an asynchronously inserted image attachment when the ninth attachment wraps the prompt layout.
+
 ## [0.1.9] - 2026-08-03
 
 ### Fixed

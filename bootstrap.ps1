@@ -799,7 +799,7 @@ function Get-WindowsTerminalActionUpdates([string]$RemotePasteDirectory) {
     $actions = for ($slot = 0; $slot -lt $ImageSlotCount; $slot++) {
         $slotText = $slot.ToString("00")
         $remotePastePath = "$RemotePasteDirectory/image-$slotText.png"
-        $payload = "${escape}[200~${remotePastePath} ${escape}[201~"
+        $payload = "${escape}[200~${remotePastePath}${escape}[201~ "
         [ordered]@{
             command = [ordered]@{
                 action = "sendInput"

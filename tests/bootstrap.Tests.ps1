@@ -307,9 +307,9 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     $rootOwned = @($nestedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" })
     Assert-True ($nestedOwned.Count -eq 0) "Project actions were inserted into a nested actions array."
     Assert-True ($rootOwned.Count -eq 10) "Project actions were not inserted into the root actions array."
-    $bracketedPasteSuffix = " $([char]27)[201~"
-    $missingTrailingSpace = @($rootOwned | Where-Object { -not $_.command.input.EndsWith($bracketedPasteSuffix) })
-    Assert-True ($missingTrailingSpace.Count -eq 0) "Project action payloads do not separate the remote path with a trailing space."
+    $bracketedPasteSuffix = "$([char]27)[201~ "
+    $missingRenderTrigger = @($rootOwned | Where-Object { -not $_.command.input.EndsWith($bracketedPasteSuffix) })
+    Assert-True ($missingRenderTrigger.Count -eq 0) "Project action payloads do not trigger rendering after bracketed paste."
 
     $escapedActionsSettings = '{"\u0061ctions":[{"command":"copy","id":"User.EscapedRoot"}]}'
     [IO.File]::WriteAllText($terminalSettings, $escapedActionsSettings, (New-Object Text.UTF8Encoding($false)))
