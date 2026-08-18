@@ -6,6 +6,10 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoid Windows Terminal's unreliable F16/F17 synthetic shortcut path by assigning slots 3 and 4 distinct F13/F14 modifier combinations; all ten uploaded image paths now reach the terminal input stream.
+
 ## [0.1.9] - 2026-08-03
 
 ### Fixed

@@ -235,6 +235,11 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     $rootOwned = @($nestedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" })
     Assert-True ($nestedOwned.Count -eq 0) "Project actions were inserted into a nested actions array."
     Assert-True ($rootOwned.Count -eq 10) "Project actions were not inserted into the root actions array."
+    $ownedBindings = @{}
+    foreach ($action in $rootOwned) { $ownedBindings[$action.id] = $action.keys }
+    Assert-True ($ownedBindings["$TerminalActionId.Slot03"] -ceq "ctrl+alt+f13") "Slot03 still uses the unreliable F16 binding."
+    Assert-True ($ownedBindings["$TerminalActionId.Slot04"] -ceq "ctrl+alt+f14") "Slot04 still uses the unreliable F17 binding."
+    Assert-True (@($ownedBindings.Values | Select-Object -Unique).Count -eq 10) "Project action bindings are not unique."
 
     $escapedActionsSettings = '{"\u0061ctions":[{"command":"copy","id":"User.EscapedRoot"}]}'
     [IO.File]::WriteAllText($terminalSettings, $escapedActionsSettings, (New-Object Text.UTF8Encoding($false)))
