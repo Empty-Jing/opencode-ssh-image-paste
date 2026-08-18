@@ -59,6 +59,12 @@ Receiver存储状态集中管理：
 
 HTTPS服务和stdio Receiver不能同时占用同一目录。显式切回SSH上传前必须先停止HTTPS服务。
 
+### 4.3 Linux HTTPS Adapter
+
+Linux HTTPS Adapter使用Axum 0.8、axum-server 0.8与rustls 0.23，并通过显式`ServerConfig`选择ring Provider，不依赖进程全局CryptoProvider。外部`serve(config_path)`Interface、CLI、TOML和OCB2/OCR2保持不变，Tokio运行时、TLS acceptor、Router和并发状态全部封装在`src/https_receiver.rs`内部。
+
+所有Method和Path由同一个fallback Handler接收，避免框架在Bearer认证前自动返回404或405。Adapter先执行认证与协议预检，再申请16请求并发许可；TLS握手超时为10秒，异步请求体收集与Receiver锁等待的超时为15秒。声明长度、chunked和未知长度请求均通过有界body收集执行`MAX_IMAGE_BYTES + 16`硬限制。共享`ReceiverState`通过异步互斥串行调用存储Interface，防止同进程请求竞争槽位；已经开始的同步原子文件存储不受异步超时抢占。
+
 ## 5. HTTPS Interface
 
 ### 5.1 Endpoint
@@ -96,7 +102,9 @@ Body: OCR2 response frame
 - `404`：未知Path；
 - `405`：Method错误；
 - `413`：请求体超过协议上限；
-- `415`：Content-Type错误。
+- `415`：Content-Type错误；
+- `408`：异步请求体收集或Receiver锁等待超过15秒；已经开始的同步原子文件存储不被该超时中断；
+- `503`：已达到16个并发请求上限。
 
 Receiver业务错误仍通过HTTP 200内的OCR2 error返回，保持现有客户端语义。
 
@@ -187,9 +195,9 @@ SSH doctor仍保留为安装/回退诊断项，但HTTPS热路径通过不依赖S
 
 ### 自动验证
 
-- 正确Token连续上传多张图片并复用Agent；
-- 缺失/错误Token返回401且响应不泄漏Token；
-- 错误Method、Path、Content-Type和超限Body被拒绝；
+- 正确Token通过真实loopback TLS连续查询并上传图片，验证固定证书和连续请求兼容性；
+- 缺失/错误/重复Token返回401且响应不泄漏Token，未认证的未知Path仍优先返回401；
+- 错误Method、Path、重复Content-Type以及声明长度或明确chunked传输的超限Body被拒绝；
 - OCB2/OCR2 request id和长度边界保持；
 - Receiver现有10槽、权限、锁和原子落盘测试不回归；
 - 旧SSH配置仍可加载并走原Adapter；
@@ -230,6 +238,6 @@ Windows环境额外运行：
 - 不增加托盘UI、进度条、通用文件传输或OpenCode改造。
 - 不自动修改Linux防火墙。
 - 不承诺网络实际吞吐不足时仍达到500 ms。
-- 同步轻量HTTP Server仅允许部署在用户明确接受的内网环境；不作为公网服务边界。
+- Axum Adapter强制TLS握手、异步请求体与锁等待超时、请求并发和请求体边界；同步原子文件存储不可由异步超时抢占。Adapter仅按单用户可信内网威胁模型设计，不作为公网服务边界。
 - systemd user与linger成为自动安装HTTPS模式的明确平台要求。
 - 不创建Release、不修改Release workflow。

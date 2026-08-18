@@ -30,7 +30,22 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }
+
 [target.'cfg(unix)'.dependencies]
+axum = { version = "0.8", default-features = false, features = [
+  "http1",
+  "tokio",
+] }
+axum-server = { version = "0.8", default-features = false, features = [
+  "tls-rustls-no-provider",
+] }
 getrandom = "0.3"
 rcgen = "0.14"
-tiny_http = { version = "0.12", features = ["ssl-rustls"] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+] }
+tokio = { version = "1.47", features = ["rt-multi-thread", "sync", "time"] }

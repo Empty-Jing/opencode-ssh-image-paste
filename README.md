@@ -288,7 +288,7 @@ receiver commands require a manual, matching client and Terminal configuration.
 - The 10 active remote slots retain images until they are overwritten or uninstalled. At the 16 MiB protocol maximum they can use up to about 160 MiB in total; normal screenshots are usually much smaller. After upgrading from the 50-slot layout, retired slots can remain for up to 24 hours before cleanup, temporarily retaining the previous higher disk usage.
 - The Windows client runs as a windowless background process and currently has no tray menu or graphical status page. It remains visible in Windows Task Manager.
 - An elevated Windows Terminal may reject input injection from a client running without elevation.
-- The `tiny_http` HTTPS receiver is intentionally a synchronous LAN-only service. Connection-level slow-client timeouts and a hard concurrent-connection limit are not yet enforced, so do not expose it to the public Internet even with TLS and Bearer authentication.
+- The HTTPS receiver uses Axum with a 10-second TLS handshake timeout, a 15-second timeout around asynchronous body collection and receiver-lock waiting, a 16-request concurrency limit, and a hard bounded body read. An atomic filesystem store already in progress is synchronous and is not preempted by that timeout. The receiver remains a single-user LAN service and must not be exposed to the public Internet even with TLS and Bearer authentication.
 
 ## Documentation
 

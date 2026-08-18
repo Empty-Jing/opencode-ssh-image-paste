@@ -56,7 +56,7 @@ flowchart LR
 
 Windows `ImageTransport` seam 提供 `HttpsTransport` 与保留的 `SshTransport`。缺少 `transport` 的旧配置默认 SSH；bootstrap 只有在 HTTPS 服务启动并通过能力探测后才写入 HTTPS。`HttpsTransport` 在进程生命周期内持有一个 `ureq::Agent`，禁用重定向并仅信任 bootstrap 安装的自签名证书，不会在任何 HTTPS 错误后实例化 SSH Adapter。
 
-Linux `ReceiverState` 集中持有目录锁、槽位状态和原子存储逻辑，stdio 与 HTTPS Receiver 复用该状态。目录锁保证两种 Receiver 不能同时占用同一目录。HTTPS Receiver 使用 `tiny_http` 的 rustls 后端，提供均需严格 Bearer Token 的 `GET /v1/capabilities` 和 `POST /v1/upload`。上传只接受 `application/octet-stream`，HTTP body 最大为 OCB2 头加 16 MiB PNG；业务结果继续用 OCR2，响应消息仍限制为 64 KiB。
+Linux `ReceiverState` 集中持有目录锁、槽位状态和原子存储逻辑，stdio 与 HTTPS Receiver 复用该状态。目录锁保证两种 Receiver 不能同时占用同一目录。HTTPS Receiver 使用 Axum、axum-server 与显式配置ring Provider的rustls 0.23，提供均需严格 Bearer Token 的 `GET /v1/capabilities` 和 `POST /v1/upload`。上传只接受 `application/octet-stream`，HTTP body 最大为 OCB2 头加 16 MiB PNG；业务结果继续用 OCR2，响应消息仍限制为 64 KiB。Adapter在认证和协议预检后执行硬请求体边界、覆盖异步请求体收集与Receiver锁等待的15秒超时，以及16请求并发限制；TLS握手超时为10秒，`ReceiverState`写入通过异步互斥保持串行。已经开始的同步原子文件存储不受异步超时抢占。
 
 bootstrap 通过 SSH 生成 SAN 覆盖显式 `-HttpsHost` 的自签名证书和 32 随机字节 Token，安装用户级 systemd unit，并要求 `systemctl --user` 可用及 `Linger=yes`。配置目录为 `0700`，Receiver 配置、证书、私钥和 unit 为 `0600`。Token 只通过 SSH 文件传输进入 Windows 用户配置，不进入 URL、日志或进程命令行。安装器不修改防火墙。
 
@@ -243,7 +243,7 @@ flowchart TD
 - 安装器需要修改 Windows Terminal `settings.json`；首次运行 Terminal 前没有该文件时，bootstrap 会要求先打开一次 Terminal。
 - Linux receiver 已自动化测试；真实 Windows 输入、剪贴板和 Windows Terminal 行为仍需在发布前执行手工兼容性矩阵。
 - Watchdog 通过 Win32 `TerminateProcess` 尽力中止超时 SSH；操作系统拒绝进程访问时无法形成严格超时保证。
-- `tiny_http` HTTPS Receiver 保持同步内网服务模型，目前没有强制连接级慢客户端超时或硬并发连接上限；它不是公网服务，即使有 TLS 和 Bearer Token 也不得直接暴露到公网。
+- Axum HTTPS Receiver强制TLS握手、异步请求体与锁等待超时、请求并发和请求体边界；同步原子文件存储开始后不可由该超时抢占。Receiver仍按单用户可信内网威胁模型设计，即使有TLS和Bearer Token也不得直接暴露到公网。
 - 最多 10 个图片槽位会保留到后续循环覆盖或卸载；第 11 次成功粘贴覆盖最旧槽位，旧版随机图片和遗留临时文件超过 24 小时后清理。
 
 ## 13. 验证策略
