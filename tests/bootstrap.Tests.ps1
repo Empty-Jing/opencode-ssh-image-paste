@@ -80,7 +80,8 @@ try {
     Assert-True ($stopCommand -match 'LoadState') "systemd stop does not distinguish a missing unit from an operation failure."
     Assert-True ($disableCommand -match 'disable --now') "systemd fallback/uninstall command does not disable and stop the service."
     Assert-True ($disableCommand -match 'is-active --quiet') "systemd fallback/uninstall command does not verify the service is inactive."
-    Assert-True ($disableCommand -notmatch '\|\| true') "systemd fallback/uninstall command unconditionally swallows failures."
+    Assert-True ($disableCommand -match 'LoadState --value 2>/dev/null \|\| true') "systemd fallback does not tolerate querying an absent unit."
+    Assert-True ($disableCommand -notmatch 'disable --now[^;]*\|\| true') "systemd fallback/uninstall command swallows disable failures."
 
     $bootstrapText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\bootstrap.ps1"))
     Assert-True ($bootstrapText -match 'cp -a ~\/\$ReceiverConfigDirectory ~\/\$remoteHttpsRollback/config; touch ~\/\$remoteHttpsRollback/config-existed') "Remote config snapshot marks success before copy completion."
@@ -298,6 +299,9 @@ $(($owned | ForEach-Object { "    $_," }) -join "`r`n")
     $rootOwned = @($nestedActionsResult.actions | Where-Object { $_.id -like "User.OpenCodeSSHImagePaste*" })
     Assert-True ($nestedOwned.Count -eq 0) "Project actions were inserted into a nested actions array."
     Assert-True ($rootOwned.Count -eq 10) "Project actions were not inserted into the root actions array."
+    $bracketedPasteSuffix = " $([char]27)[201~"
+    $missingTrailingSpace = @($rootOwned | Where-Object { -not $_.command.input.EndsWith($bracketedPasteSuffix) })
+    Assert-True ($missingTrailingSpace.Count -eq 0) "Project action payloads do not separate the remote path with a trailing space."
 
     $escapedActionsSettings = '{"\u0061ctions":[{"command":"copy","id":"User.EscapedRoot"}]}'
     [IO.File]::WriteAllText($terminalSettings, $escapedActionsSettings, (New-Object Text.UTF8Encoding($false)))
