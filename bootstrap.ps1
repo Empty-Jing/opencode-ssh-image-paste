@@ -747,7 +747,9 @@ function Get-TerminalActionBinding([int]$Slot) {
     if ($Slot -lt 0 -or $Slot -ge $ImageSlotCount) {
         throw "Image slot $Slot is out of range."
     }
-    $functionKey = 13 + ($Slot % 12)
+    if ($Slot -eq 3) { return "ctrl+alt+f13" }
+    if ($Slot -eq 4) { return "ctrl+alt+f14" }
+    $functionKey = 13 + $Slot
     return "ctrl+alt+shift+f$functionKey"
 }
 

@@ -73,7 +73,7 @@ Windows client 启动时先获取当前用户会话内的命名 Mutex，重复�
 1. 低级键盘和鼠标钩子只做快速判断、活动计数和入队，不执行阻塞工作。
 2. 单工作线程读取剪贴板、编码 PNG，并串行处理上传，避免多个请求争抢剪贴板。
 3. `ImageTransport` 选择长期复用连接池的 `HttpsTransport` 或显式配置的 `SshTransport`；前者严格验证专用证书且禁用重定向，后者保留 stdin/stdout 与 watchdog 行为。
-4. 前台窗口、剪贴板序号和用户活动代次共同防止错误注入；上传成功后根据 receiver 返回的槽位，通过对应的私有 `Ctrl+Alt+Shift+F13` 到 `F22` 组合键触发 Windows Terminal Action。
+4. 前台窗口、剪贴板序号和用户活动代次共同防止错误注入；上传成功后根据 receiver 返回的槽位触发对应的私有 Windows Terminal Action。槽位 0–2 和 5–9 使用 `Ctrl+Alt+Shift+F13` 到 `F15` 及 `F18` 到 `F22`；槽位 3、4 使用 `Ctrl+Alt+F13`、`Ctrl+Alt+F14`，避开实机无法可靠触发的 F16/F17。
 
 ### 5.3 `protocol.rs`
 

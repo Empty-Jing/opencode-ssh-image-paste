@@ -1310,8 +1310,18 @@ fn terminal_action_shortcut(slot: usize) -> Result<(Vec<u16>, u16)> {
         slot < protocol::IMAGE_SLOT_COUNT,
         "image slot {slot} is out of range"
     );
-    let key = VK_F13_CODE + u16::try_from(slot).expect("slot key fits in u16");
-    Ok((vec![VK_CONTROL, VK_MENU, VK_SHIFT], key))
+    // keybd_event does not reliably trigger Windows Terminal bindings for F16
+    // and F17 on the validated Windows host. Reuse reliable F13/F14 keys with a
+    // distinct modifier set for slots 3 and 4; keep every other proven binding.
+    let shortcut = match slot {
+        3 => (vec![VK_CONTROL, VK_MENU], VK_F13_CODE),
+        4 => (vec![VK_CONTROL, VK_MENU], VK_F13_CODE + 1),
+        _ => (
+            vec![VK_CONTROL, VK_MENU, VK_SHIFT],
+            VK_F13_CODE + u16::try_from(slot).expect("slot key fits in u16"),
+        ),
+    };
+    Ok(shortcut)
 }
 
 trait ImageTransport {
@@ -1769,9 +1779,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_slot_shortcuts_match_slot_boundaries() {
+    fn terminal_slot_shortcuts_avoid_unreliable_function_keys() {
         let cases = [
             (0, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F13_CODE),
+            (3, vec![VK_CONTROL, VK_MENU], VK_F13_CODE),
+            (4, vec![VK_CONTROL, VK_MENU], VK_F13_CODE + 1),
             (9, vec![VK_CONTROL, VK_MENU, VK_SHIFT], VK_F13_CODE + 9),
         ];
         for (slot, modifiers, key) in cases {
