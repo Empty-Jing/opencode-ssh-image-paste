@@ -122,11 +122,7 @@ function Get-SystemdStopCommand([bool]$Disable) {
         "if systemctl --user is-active --quiet $ProgramName.service; then exit 1; fi"
 }
 
-function Test-HttpsReceiver(
-    [string]$Endpoint,
-    [string]$Token,
-    [string]$CertificatePath
-) {
+function Initialize-PinnedCertificateHttpHandler {
     Add-Type -AssemblyName System.Net.Http
     if (-not ("OpenCodeSshImagePaste.Install.PinnedCertificateHttpHandler" -as [type])) {
         $validatorSource = @'
@@ -168,11 +164,23 @@ namespace OpenCodeSshImagePaste.Install
     }
 }
 '@
+        $validatorAssemblies = @(
+            [System.Net.Http.HttpClient].Assembly.Location
+            [System.Net.Security.SslPolicyErrors].Assembly.Location
+            [System.Security.Cryptography.X509Certificates.X509Certificate2].Assembly.Location
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
         Add-Type `
             -TypeDefinition $validatorSource `
-            -ReferencedAssemblies @([System.Net.Http.HttpClient].Assembly.Location)
+            -ReferencedAssemblies $validatorAssemblies
     }
+}
 
+function Test-HttpsReceiver(
+    [string]$Endpoint,
+    [string]$Token,
+    [string]$CertificatePath
+) {
+    Initialize-PinnedCertificateHttpHandler
     $expectedCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($CertificatePath)
     $previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
     $handler = $null

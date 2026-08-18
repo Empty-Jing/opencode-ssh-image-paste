@@ -21,6 +21,11 @@ try {
 
     . (Join-Path $PSScriptRoot "..\bootstrap.ps1") -InternalTestMode
 
+    Initialize-PinnedCertificateHttpHandler
+    Assert-True (
+        $null -ne ("OpenCodeSshImagePaste.Install.PinnedCertificateHttpHandler" -as [type])
+    ) "Pinned certificate handler did not compile with its explicit assembly references."
+
     Assert-True (-not $UseElevatedStartup) "Default installation did not select normal startup."
     Assert-True $UseHttpsTransport "Default installation did not select HTTPS transport."
     Assert-True ($HttpsPort -eq 47832) "Default HTTPS port was not 47832."
@@ -88,6 +93,9 @@ try {
     Assert-True ($bootstrapText -match 'if \(\$UseHttpsTransport -and \$remoteHttpsStateCaptured\)') "HTTPS rollback is not gated by a verified service-state snapshot."
     Assert-True ($bootstrapText -match 'else \{\s*\$restoreRemote = "set -eu; \$restoreBinary"') "Legacy SSH rollback still requires a systemd service-state snapshot."
     Assert-True ($bootstrapText -match 'Add-Type -AssemblyName System\.Net\.Http') "Windows PowerShell HTTPS probe does not load System.Net.Http."
+    foreach ($assemblyType in @('HttpClient', 'SslPolicyErrors', 'X509Certificate2')) {
+        Assert-True ($bootstrapText -match "\[[^\]]*$assemblyType\]") "HTTPS probe does not reference the $assemblyType assembly."
+    }
     Assert-True ($bootstrapText -match 'PinnedCertificateHttpHandler\]::Create\(\$expectedCertificate\.RawData\)') "HTTPS probe does not create its runspace-independent certificate handler."
     Assert-True ($bootstrapText -match 'ServerCertificateCustomValidationCallback = delegate') "Certificate validation still depends on a PowerShell ScriptBlock callback."
     Assert-True ($bootstrapText -match 'difference \|= certificate\.RawData\[index\] \^ expected\[index\]') "Pinned certificate handler does not compare the complete certificate bytes."
