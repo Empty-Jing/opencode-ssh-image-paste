@@ -2,10 +2,12 @@ use crate::protocol::{self, Request};
 use anyhow::{Context, Result, bail};
 use arboard::{Clipboard, ImageData};
 use serde::Deserialize;
+use std::any::Any;
 use std::borrow::Cow;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::os::windows::process::CommandExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -854,28 +856,116 @@ fn is_target_window(window: *mut core::ffi::c_void) -> bool {
 }
 
 fn worker(receiver: mpsc::Receiver<PasteRequest>, config: Config, timing_log: PathBuf) {
-    let mut transport = match build_transport(&config) {
-        Ok(transport) => transport,
-        Err(error) => {
-            eprintln!("could not initialize image transport: {error:#}");
-            return;
+    let mut transport = match build_worker_state(|| build_transport(&config)) {
+        Ok(transport) => Some(transport),
+        Err(failure) => {
+            let error = transport_build_error("initialize", failure);
+            eprintln!("{error:#}");
+            None
         }
     };
     for request in receiver {
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let mut timing = PasteTiming::new(request_id, request.queued_at);
-        match handle_paste(
-            request,
-            request_id,
-            &config,
-            transport.as_mut(),
-            &mut timing,
-        ) {
-            Ok(()) => write_timing_log(&timing_log, &timing, "ok", None),
-            Err(error) => {
+        if transport.is_none() {
+            match build_worker_state(|| build_transport(&config)) {
+                Ok(replacement) => transport = Some(replacement),
+                Err(failure) => {
+                    let error = transport_build_error("recover", failure);
+                    write_timing_log(&timing_log, &timing, "error", Some(&error));
+                    eprintln!("{error:#}");
+                    continue;
+                }
+            }
+        }
+        let active_transport = match transport.as_deref_mut() {
+            Some(active_transport) => active_transport,
+            None => continue,
+        };
+        let outcome = catch_worker_request(|| {
+            handle_paste(request, request_id, &config, active_transport, &mut timing)
+        });
+        match outcome {
+            Ok(Ok(())) => write_timing_log(&timing_log, &timing, "ok", None),
+            Ok(Err(error)) => {
                 write_timing_log(&timing_log, &timing, "error", Some(&error));
                 eprintln!("image paste failed: {error:#}");
             }
+            Err(panic_message) => {
+                let (drop_panic, recovery_error) =
+                    rebuild_worker_state(&mut transport, || build_transport(&config));
+                let mut detail = format!("image paste worker panicked: {panic_message}");
+                if let Some(drop_panic) = drop_panic {
+                    detail.push_str(&format!("; discarding transport panicked: {drop_panic}"));
+                }
+                if let Some(recovery_failure) = recovery_error {
+                    let recovery_error = transport_build_error("recover", recovery_failure);
+                    detail.push_str(&format!("; {recovery_error:#}"));
+                }
+                let error = anyhow::anyhow!(detail);
+                write_timing_log(&timing_log, &timing, "panic", Some(&error));
+                eprintln!("{error:#}");
+            }
+        }
+    }
+}
+
+fn catch_worker_request<T>(operation: impl FnOnce() -> T) -> std::result::Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(operation))
+        .map_err(|payload| panic_payload_message(payload.as_ref()))
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_owned()
+    }
+}
+
+enum WorkerStateBuildFailure<E> {
+    Error(E),
+    Panic(String),
+}
+
+fn build_worker_state<T, E>(
+    build: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, WorkerStateBuildFailure<E>> {
+    match catch_worker_request(build) {
+        Ok(Ok(state)) => Ok(state),
+        Ok(Err(error)) => Err(WorkerStateBuildFailure::Error(error)),
+        Err(message) => Err(WorkerStateBuildFailure::Panic(message)),
+    }
+}
+
+fn rebuild_worker_state<T, E>(
+    state: &mut Option<T>,
+    build: impl FnOnce() -> std::result::Result<T, E>,
+) -> (Option<String>, Option<WorkerStateBuildFailure<E>>) {
+    let stale_state = state.take();
+    let drop_panic = catch_worker_request(|| drop(stale_state)).err();
+    let recovery_failure = match build_worker_state(build) {
+        Ok(replacement) => {
+            *state = Some(replacement);
+            None
+        }
+        Err(failure) => Some(failure),
+    };
+    (drop_panic, recovery_failure)
+}
+
+fn transport_build_error(
+    action: &str,
+    failure: WorkerStateBuildFailure<anyhow::Error>,
+) -> anyhow::Error {
+    match failure {
+        WorkerStateBuildFailure::Error(error) => {
+            error.context(format!("could not {action} image transport"))
+        }
+        WorkerStateBuildFailure::Panic(message) => {
+            anyhow::anyhow!("image transport {action} panicked: {message}")
         }
     }
 }
@@ -1875,6 +1965,108 @@ mod tests {
     fn request_deadline_rejects_expired_budget() {
         assert!(remaining_request_time(Instant::now() - Duration::from_millis(1)).is_err());
         assert!(remaining_request_time(Instant::now() + Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn worker_panic_boundary_allows_the_next_operation() {
+        let mut attempts = 0;
+        let first = catch_worker_request(|| {
+            attempts += 1;
+            panic!("controlled worker panic");
+        });
+        assert_eq!(first.unwrap_err(), "controlled worker panic");
+
+        let second = catch_worker_request(|| {
+            attempts += 1;
+            "recovered"
+        });
+        assert_eq!(second.unwrap(), "recovered");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn worker_state_is_dropped_before_rebuild() {
+        struct State(std::sync::Arc<AtomicBool>);
+
+        impl Drop for State {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(AtomicBool::new(false));
+        let mut state = Some(State(dropped.clone()));
+        let (drop_panic, recovery_error) = rebuild_worker_state(&mut state, || {
+            assert!(dropped.load(Ordering::SeqCst));
+            Ok::<_, ()>(State(std::sync::Arc::new(AtomicBool::new(false))))
+        });
+        assert!(drop_panic.is_none());
+        assert!(recovery_error.is_none());
+        assert!(state.is_some());
+    }
+
+    #[test]
+    fn failed_worker_state_rebuild_leaves_retryable_empty_state() {
+        let mut state = Some(1_u8);
+        let (drop_panic, recovery_error) =
+            rebuild_worker_state(&mut state, || Err::<u8, _>("rebuild failed"));
+        assert!(drop_panic.is_none());
+        assert!(matches!(
+            recovery_error,
+            Some(WorkerStateBuildFailure::Error("rebuild failed"))
+        ));
+        assert!(state.is_none());
+
+        let (drop_panic, recovery_error) = rebuild_worker_state(&mut state, || Ok::<_, &str>(2));
+        assert!(drop_panic.is_none());
+        assert!(recovery_error.is_none());
+        assert_eq!(state, Some(2));
+    }
+
+    #[test]
+    fn panicking_worker_state_rebuild_leaves_retryable_empty_state() {
+        let mut state = Some(1_u8);
+        let (drop_panic, recovery_error) =
+            rebuild_worker_state(&mut state, || -> std::result::Result<u8, &str> {
+                panic!("controlled rebuild panic")
+            });
+        assert!(drop_panic.is_none());
+        assert!(matches!(
+            recovery_error,
+            Some(WorkerStateBuildFailure::Panic(message))
+                if message == "controlled rebuild panic"
+        ));
+        assert!(state.is_none());
+
+        let (drop_panic, recovery_error) = rebuild_worker_state(&mut state, || Ok::<_, &str>(3));
+        assert!(drop_panic.is_none());
+        assert!(recovery_error.is_none());
+        assert_eq!(state, Some(3));
+    }
+
+    #[test]
+    fn panicking_worker_state_drop_does_not_block_rebuild() {
+        struct PanickingDrop;
+
+        impl Drop for PanickingDrop {
+            fn drop(&mut self) {
+                panic!("controlled drop panic");
+            }
+        }
+
+        let mut state = Some(PanickingDrop);
+        let (drop_panic, recovery_error) =
+            rebuild_worker_state(&mut state, || Ok::<_, ()>(PanickingDrop));
+        assert_eq!(drop_panic.as_deref(), Some("controlled drop panic"));
+        assert!(recovery_error.is_none());
+        assert!(state.is_some());
+        std::mem::forget(state.take());
+    }
+
+    #[test]
+    fn worker_panic_payload_has_a_stable_non_string_fallback() {
+        let result = catch_worker_request(|| std::panic::panic_any(7_u8));
+        assert_eq!(result.unwrap_err(), "non-string panic payload");
     }
 
     #[test]

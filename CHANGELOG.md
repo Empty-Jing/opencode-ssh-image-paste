@@ -20,6 +20,7 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Isolate each Windows paste request from worker panics, discard and rebuild potentially corrupted transports, and keep later image pastes available instead of leaving a live but permanently ineffective client process.
 - Avoid Windows Terminal's unreliable F16/F17 synthetic shortcut path by assigning slots 3 and 4 distinct F13/F14 modifier combinations; all ten uploaded image paths now reach the terminal input stream.
 - Emit the path-separating space after the bracketed-paste terminator so OpenCode refreshes an asynchronously inserted image attachment when the ninth attachment wraps the prompt layout.
 
