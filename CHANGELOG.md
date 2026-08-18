@@ -6,9 +6,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-18
+
 ### Fixed
 
 - Avoid Windows Terminal's unreliable F16/F17 synthetic shortcut path by assigning slots 3 and 4 distinct F13/F14 modifier combinations; all ten uploaded image paths now reach the terminal input stream.
+
+### Changed
+
+- Update the `toml` dependency and pinned GitHub Actions revisions through the reviewed Dependabot changes included on `main`.
 
 ## [0.1.9] - 2026-08-03
 
@@ -162,7 +168,8 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `doctor` diagnostics and one-command Windows/Linux bootstrap installation.
 - Release binaries for Windows x86_64, Linux x86_64, and Linux aarch64 with SHA-256 checksums.
 
-[Unreleased]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/Empty-Jing/opencode-ssh-image-paste/compare/v0.1.6...v0.1.7
